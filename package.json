@@ -1,0 +1,23 @@
+{
+  "name": "circle-faucet-vercel",
+  "version": "1.0.0",
+  "description": "Circle Testnet Faucet Claimer - Vercel Deployment",
+  "main": "api/claim.js",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
+  },
+  "keywords": [
+    "circle",
+    "faucet",
+    "testnet",
+    "arc",
+    "blockchain"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "vercel": "^33.0.0"
+  }
+}
