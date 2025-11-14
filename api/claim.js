@@ -1,4 +1,4 @@
-const https = require('https');
+import https from 'https';
 
 // Get API key from environment variable or use default
 const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY || "TEST_API_KEY:1ef93a2a482adb58df2c615510b24c61:81b8e96bb7cb449fceba22574630ea0c";
