@@ -336,10 +336,8 @@
         let lastClaimTime = {};
         const COOLDOWN_HOURS = 24;
         
-        // Get API endpoint based on environment
-        const API_ENDPOINT = window.location.hostname === 'localhost' 
-            ? 'http://localhost:8081/claim'  // Local development
-            : '/api/claim';  // Vercel production
+        // Get API endpoint - Vercel automatically routes /api/* to serverless functions
+        const API_ENDPOINT = '/api/claim';
         
         // Load claim history
         function loadClaimHistory() {
@@ -441,6 +439,9 @@
             };
             
             try {
+                console.log('Making request to:', API_ENDPOINT);
+                console.log('Request data:', requestData);
+                
                 const response = await fetch(API_ENDPOINT, {
                     method: 'POST',
                     headers: {
@@ -449,7 +450,9 @@
                     body: JSON.stringify(requestData)
                 });
                 
+                console.log('Response status:', response.status);
                 const data = await response.json();
+                console.log('Response data:', data);
                 
                 if (response.ok) {
                     recordClaim(address, blockchain);
@@ -484,11 +487,13 @@
                     );
                 }
             } catch (error) {
+                console.error('Fetch error:', error);
                 showResult('error', 
                     `❌ Connection Error: ${error.message}`,
                     { 
                         details: 'Failed to connect to the API endpoint',
-                        endpoint: API_ENDPOINT
+                        endpoint: API_ENDPOINT,
+                        error: error.toString()
                     }
                 );
             } finally {
