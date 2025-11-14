@@ -1,9 +1,9 @@
 const https = require('https');
 
-// Get API key from environment variable or use default (SET THIS IN VERCEL!)
+// Get API key from environment variable or use default
 const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY || "TEST_API_KEY:1ef93a2a482adb58df2c615510b24c61:81b8e96bb7cb449fceba22574630ea0c";
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   // Set CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -107,4 +107,4 @@ module.exports = async (req, res) => {
       message: error.message 
     });
   }
-};
+}
