@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Circle Faucet Claimer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .container {
+            background: white;
+            padding: 40px;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 600px;
+            width: 100%;
+            animation: slideIn 0.5s ease-out;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        
+        .form-group {
+            margin-bottom: 25px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+            font-size: 14px;
+        }
+        
+        input[type="text"] {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+        
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
+        select {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            background-color: white;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
+        .checkbox-group {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+        
+        .checkbox-item {
+            display: flex;
+            align-items: center;
+            padding: 10px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .checkbox-item:hover {
+            border-color: #667eea;
+            background-color: #f8f9ff;
+        }
+        
+        .checkbox-item input[type="checkbox"] {
+            margin-right: 8px;
+            cursor: pointer;
+            width: 18px;
+            height: 18px;
+        }
+        
+        .checkbox-item label {
+            margin: 0;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        
+        button {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-top: 10px;
+        }
+        
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+        
+        button:active:not(:disabled) {
+            transform: translateY(0);
+        }
+        
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .result {
+            margin-top: 20px;
+            padding: 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            line-height: 1.6;
+            animation: fadeIn 0.3s ease-out;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        .result.success {
+            background-color: #d4edda;
+            border: 2px solid #28a745;
+            color: #155724;
+        }
+        
+        .result.error {
+            background-color: #f8d7da;
+            border: 2px solid #dc3545;
+            color: #721c24;
+        }
+        
+        .result.warning {
+            background-color: #fff3cd;
+            border: 2px solid #ffc107;
+            color: #856404;
+        }
+        
+        .result.info {
+            background-color: #d1ecf1;
+            border: 2px solid #17a2b8;
+            color: #0c5460;
+        }
+        
+        .hidden {
+            display: none;
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .response-data {
+            background: rgba(0, 0, 0, 0.05);
+            padding: 15px;
+            border-radius: 6px;
+            margin-top: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        
+        .info-box {
+            background-color: #e7f3ff;
+            border: 2px solid #2196F3;
+            color: #0d47a1;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 13px;
+        }
+        
+        .info-box strong {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        
+        .info-box ul {
+            margin-left: 20px;
+            margin-top: 8px;
+        }
+        
+        .info-box li {
+            margin-bottom: 5px;
+        }
+        
+        .tips {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(0,0,0,0.1);
+        }
+        
+        .tips strong {
+            display: block;
+            margin-bottom: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚰 Circle Faucet Claimer</h1>
+        <p class="subtitle">Claim testnet tokens on Arc and other networks</p>
+        
+        <div class="info-box">
+            <strong>ℹ️ Faucet Rate Limits:</strong>
+            Circle's faucet has strict rate limits to prevent abuse:
+            <ul>
+                <li><strong>Per wallet:</strong> 1 claim every 24 hours</li>
+                <li><strong>Per IP:</strong> Limited requests per hour</li>
+                <li><strong>Per network:</strong> Daily claim limits apply</li>
+            </ul>
+            If you see a rate limit error, try a different wallet or network.
+        </div>
+        
+        <div class="form-group">
+            <label for="address">Wallet Address *</label>
+            <input type="text" id="address" placeholder="0x...">
+        </div>
+        
+        <div class="form-group">
+            <label for="blockchain">Blockchain Network *</label>
+            <select id="blockchain">
+                <option value="ARC-TESTNET">ARC-TESTNET</option>
+                <option value="ETH-SEPOLIA">ETH-SEPOLIA</option>
+                <option value="AVAX-FUJI">AVAX-FUJI</option>
+                <option value="MATIC-AMOY">MATIC-AMOY</option>
+                <option value="SOL-DEVNET">SOL-DEVNET</option>
+                <option value="ARB-SEPOLIA">ARB-SEPOLIA</option>
+                <option value="UNI-SEPOLIA">UNI-SEPOLIA</option>
+                <option value="BASE-SEPOLIA">BASE-SEPOLIA</option>
+                <option value="OP-SEPOLIA">OP-SEPOLIA</option>
+                <option value="APTOS-TESTNET">APTOS-TESTNET</option>
+            </select>
+        </div>
+        
+        <div class="form-group">
+            <label>Tokens to Claim *</label>
+            <div class="checkbox-group">
+                <div class="checkbox-item">
+                    <input type="checkbox" id="native">
+                    <label for="native">Native Token</label>
+                </div>
+                <div class="checkbox-item">
+                    <input type="checkbox" id="usdc" checked>
+                    <label for="usdc">USDC</label>
+                </div>
+                <div class="checkbox-item">
+                    <input type="checkbox" id="eurc">
+                    <label for="eurc">EURC</label>
+                </div>
+            </div>
+        </div>
+        
+        <button type="button" id="submitBtn" onclick="claimTokens()">
+            Claim Tokens
+        </button>
+        
+        <div id="result" class="result hidden"></div>
+    </div>
+
+    <script>
+        let lastClaimTime = {};
+        const COOLDOWN_HOURS = 24;
+        
+        // Get API endpoint - Vercel automatically routes /api/* to serverless functions
+        const API_ENDPOINT = '/api/claim';
+        
+        // Load claim history
+        function loadClaimHistory() {
+            try {
+                const stored = localStorage.getItem('circleFaucetClaims');
+                if (stored) {
+                    lastClaimTime = JSON.parse(stored);
+                }
+            } catch (e) {
+                console.error('Failed to load claim history:', e);
+            }
+        }
+        
+        // Save claim history
+        function saveClaimHistory() {
+            try {
+                localStorage.setItem('circleFaucetClaims', JSON.stringify(lastClaimTime));
+            } catch (e) {
+                console.error('Failed to save claim history:', e);
+            }
+        }
+        
+        // Check if address can claim
+        function canClaim(address, blockchain) {
+            const key = `${address}-${blockchain}`;
+            if (!lastClaimTime[key]) return { canClaim: true };
+            
+            const lastClaim = new Date(lastClaimTime[key]);
+            const now = new Date();
+            const hoursPassed = (now - lastClaim) / (1000 * 60 * 60);
+            
+            if (hoursPassed < COOLDOWN_HOURS) {
+                const hoursRemaining = COOLDOWN_HOURS - hoursPassed;
+                return { 
+                    canClaim: false, 
+                    hoursRemaining: hoursRemaining,
+                    nextClaimTime: new Date(lastClaim.getTime() + (COOLDOWN_HOURS * 60 * 60 * 1000))
+                };
+            }
+            
+            return { canClaim: true };
+        }
+        
+        // Record successful claim
+        function recordClaim(address, blockchain) {
+            const key = `${address}-${blockchain}`;
+            lastClaimTime[key] = new Date().toISOString();
+            saveClaimHistory();
+        }
+        
+        async function claimTokens() {
+            const address = document.getElementById('address').value.trim();
+            const blockchain = document.getElementById('blockchain').value;
+            const native = document.getElementById('native').checked;
+            const usdc = document.getElementById('usdc').checked;
+            const eurc = document.getElementById('eurc').checked;
+            const submitBtn = document.getElementById('submitBtn');
+            const resultDiv = document.getElementById('result');
+            
+            // Validation
+            if (!address) {
+                showResult('error', '❌ Please enter a wallet address');
+                return;
+            }
+            
+            if (!native && !usdc && !eurc) {
+                showResult('error', '❌ Please select at least one token to claim');
+                return;
+            }
+            
+            // Check cooldown
+            loadClaimHistory();
+            const claimCheck = canClaim(address, blockchain);
+            if (!claimCheck.canClaim) {
+                const hours = Math.floor(claimCheck.hoursRemaining);
+                const minutes = Math.floor((claimCheck.hoursRemaining % 1) * 60);
+                showResult('warning', 
+                    `⏰ Rate Limit: You already claimed from this address on ${blockchain}`,
+                    {
+                        message: `Please wait ${hours}h ${minutes}m before claiming again`,
+                        nextClaimTime: claimCheck.nextClaimTime.toLocaleString(),
+                        tip: 'Try a different wallet address or blockchain network'
+                    }
+                );
+                return;
+            }
+            
+            // Disable button and show loading state
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<span class="loading"></span>Claiming...';
+            resultDiv.classList.add('hidden');
+            
+            const requestData = {
+                address: address,
+                blockchain: blockchain,
+                native: native,
+                usdc: usdc,
+                eurc: eurc
+            };
+            
+            try {
+                console.log('Making request to:', API_ENDPOINT);
+                console.log('Request data:', requestData);
+                
+                const response = await fetch(API_ENDPOINT, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestData)
+                });
+                
+                console.log('Response status:', response.status);
+                console.log('Response headers:', response.headers.get('content-type'));
+                
+                // Check if response is JSON
+                const contentType = response.headers.get('content-type');
+                let data;
+                
+                if (contentType && contentType.includes('application/json')) {
+                    data = await response.json();
+                } else {
+                    // If not JSON, get text to see the actual error
+                    const text = await response.text();
+                    console.error('Non-JSON response:', text);
+                    data = { 
+                        error: 'Server error',
+                        message: text.substring(0, 200),
+                        fullError: text
+                    };
+                }
+                
+                console.log('Response data:', data);
+                
+                if (response.ok) {
+                    recordClaim(address, blockchain);
+                    showResult('success', 
+                        '✅ Tokens claimed successfully!',
+                        {
+                            ...data,
+                            nextClaimTime: new Date(Date.now() + (COOLDOWN_HOURS * 60 * 60 * 1000)).toLocaleString()
+                        }
+                    );
+                } else if (data.code === 5 || data.message?.includes('rate limit')) {
+                    // Rate limit error
+                    recordClaim(address, blockchain);
+                    showResult('error', 
+                        `⏰ Rate Limit Exceeded`,
+                        {
+                            message: data.message || 'API rate limit error',
+                            reason: 'Circle faucet limits claims to once per 24 hours per wallet/network',
+                            solutions: [
+                                '1. Wait 24 hours before claiming again with this address',
+                                '2. Try a different wallet address',
+                                '3. Try a different blockchain network',
+                                '4. Check if you recently claimed from the same IP address'
+                            ],
+                            nextAttempt: new Date(Date.now() + (COOLDOWN_HOURS * 60 * 60 * 1000)).toLocaleString()
+                        }
+                    );
+                } else {
+                    showResult('error', 
+                        `❌ Claim failed: ${data.message || data.error || 'Unknown error'}`,
+                        data
+                    );
+                }
+            } catch (error) {
+                console.error('Fetch error:', error);
+                showResult('error', 
+                    `❌ Connection Error: ${error.message}`,
+                    { 
+                        details: 'Failed to connect to the API endpoint',
+                        endpoint: API_ENDPOINT,
+                        error: error.toString()
+                    }
+                );
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = 'Claim Tokens';
+            }
+        }
+        
+        function showResult(type, message, data) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.className = `result ${type}`;
+            
+            let html = `<strong>${message}</strong>`;
+            
+            if (data) {
+                if (data.solutions && Array.isArray(data.solutions)) {
+                    html += '<div class="tips"><strong>Solutions:</strong>';
+                    data.solutions.forEach(sol => {
+                        html += `<div style="margin: 5px 0;">• ${sol}</div>`;
+                    });
+                    html += '</div>';
+                    delete data.solutions;
+                }
+                
+                html += `<div class="response-data">${JSON.stringify(data, null, 2)}</div>`;
+            }
+            
+            resultDiv.innerHTML = html;
+            resultDiv.classList.remove('hidden');
+        }
+        
+        // Load history on page load
+        loadClaimHistory();
+        
+        // Allow Enter key to submit
+        document.getElementById('address').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                claimTokens();
+            }
+        });
+    </script>
+</body>
+</html>
