@@ -2,22 +2,18 @@ import https from 'https';
 import crypto from 'crypto';
 
 /**
- * THREAT MODEL & TRUST BOUNDARIES
+ * UPDATED RATE LIMITING STRATEGY
  * 
  * BYO API Key Mode:
- * - User owns their Circle quota → we don't enforce token limits
- * - Server only protects: infrastructure, abuse optics, DoS
- * - Let Circle enforce their own rate limits (varies: 5-10 claims/day)
+ * - NO rate limiting from our side
+ * - Circle enforces their own limits (5-10 claims/day, varies)
+ * - Users can switch keys when they hit Circle's limit
+ * - We only protect infrastructure (100 req/hour per IP)
  * 
  * Default Faucet Mode:
  * - We own the quota → STRICT enforcement required
- * - Multiple layers: password, rate limits, audit logs
- * 
- * What We Protect Against:
- * - DoS / spam against our Vercel functions
- * - Circle flagging our domain for abuse
- * - Password brute force against default mode
- * - Accidental API key exposure in logs/errors
+ * - IP-based: 3 claims per 24h
+ * - Wallet-based: 1 claim per network per 24h
  */
 
 // Environment variables
@@ -28,10 +24,10 @@ const REVOKED_KEY_HASHES = (process.env.REVOKED_API_KEY_HASHES || '').split(',')
 
 // Validate critical env vars on startup
 if (!DEFAULT_PASSWORD_HASH && !CIRCLE_API_KEYS) {
-  console.error('[FATAL] No password hash or API keys configured. Set DEFAULT_PASSWORD_HASH or CIRCLE_API_KEYS in environment variables.');
+  console.error('[FATAL] No password hash or API keys configured.');
 }
 
-// Supported chains (strict validation)
+// Supported chains
 const SUPPORTED_CHAINS = {
   'ARC-TESTNET': 'ARC-TESTNET',
   'ETH-SEPOLIA': 'ETH-SEPOLIA',
@@ -45,39 +41,33 @@ const SUPPORTED_CHAINS = {
   'APTOS-TESTNET': 'APTOS-TESTNET'
 };
 
-// Parse multiple API keys for default faucet
 const getApiKeys = () => {
   if (!CIRCLE_API_KEYS) return [];
   return CIRCLE_API_KEYS.split(',').map(k => k.trim()).filter(k => k.length > 0);
 };
 
-// Secure password hashing (simplified - no salt needed for demo)
 const hashPassword = (password) => {
   return crypto.createHash('sha256').update(password).digest('hex');
 };
 
-// Validate API key format
 const validateApiKey = (key) => {
   if (!key || typeof key !== 'string') return false;
   const parts = key.split(':');
   return parts.length === 3 && parts[0] === 'TEST_API_KEY';
 };
 
-// Hash for revocation
 const hashApiKey = (key) => {
   return crypto.createHash('sha256').update(key).digest('hex');
 };
 
 // Simple in-memory rate limiter
-// WARNING: This resets on deploy. Use Vercel KV/Redis for production.
 const rateLimitStore = new Map();
-const requestCountStore = new Map(); // Infrastructure DoS protection
+const requestCountStore = new Map();
 
 const checkRateLimit = (identifier, limit, windowMs) => {
   const now = Date.now();
   const windowStart = now - windowMs;
   
-  // Clean expired entries
   const timestamps = (rateLimitStore.get(identifier) || []).filter(t => t > windowStart);
   rateLimitStore.set(identifier, timestamps);
   
@@ -101,15 +91,14 @@ const recordRateLimit = (identifier) => {
   rateLimitStore.set(identifier, timestamps);
 };
 
-// Infrastructure DoS protection (applies to ALL requests)
+// Infrastructure DoS protection (all requests)
 const checkInfraLimit = (ip) => {
   const now = Date.now();
-  const windowStart = now - (60 * 60 * 1000); // 1 hour
+  const windowStart = now - (60 * 60 * 1000);
   
   const requests = (requestCountStore.get(ip) || []).filter(t => t > windowStart);
   requestCountStore.set(ip, requests);
   
-  // 100 requests per hour per IP (infrastructure protection)
   if (requests.length >= 100) {
     return { allowed: false, resetTime: new Date(requests[0] + (60 * 60 * 1000)) };
   }
@@ -119,17 +108,13 @@ const checkInfraLimit = (ip) => {
   return { allowed: true };
 };
 
-// Audit logging (write-only, for abuse detection)
 const auditLog = (event) => {
-  const log = {
+  console.log('[AUDIT]', JSON.stringify({
     timestamp: new Date().toISOString(),
     ...event
-  };
-  
-  console.log('[AUDIT]', JSON.stringify(log));
+  }));
 };
 
-// Make Circle API request
 const makeCircleRequest = (apiKey, payload) => {
   return new Promise((resolve, reject) => {
     const postData = JSON.stringify(payload);
@@ -144,7 +129,7 @@ const makeCircleRequest = (apiKey, payload) => {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(postData)
       },
-      timeout: 10000 // 10s timeout
+      timeout: 10000
     };
     
     const req = https.request(options, (res) => {
@@ -202,7 +187,6 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    // Check if faucet is disabled (emergency kill switch)
     if (FAUCET_DISABLED) {
       return res.status(503).json({ 
         error: 'Faucet temporarily disabled',
@@ -210,7 +194,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Infrastructure DoS protection (all requests, all modes)
+    // Infrastructure DoS protection
     const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || 
                      req.headers['x-real-ip'] || 
                      'unknown';
@@ -224,22 +208,21 @@ export default async function handler(req, res) {
       
       return res.status(429).json({
         error: 'Too many requests',
-        message: 'Rate limit exceeded. Please try again later.',
+        message: 'Infrastructure rate limit exceeded. Please try again later.',
         resetTime: infraCheck.resetTime
       });
     }
 
-    // Extract and validate request body
     let { address, blockchain, native, usdc, eurc, apiKey, password, mode } = req.body;
 
-    // Immediately remove sensitive data from request object (anti-logging)
+    // Remove sensitive data from logging
     if (apiKey) {
       const keyHash = hashApiKey(apiKey);
       auditData.apiKeyHash = keyHash.substring(0, 16);
-      delete req.body.apiKey; // Never log raw API keys
+      delete req.body.apiKey;
     }
     if (password) {
-      delete req.body.password; // Never log passwords
+      delete req.body.password;
     }
 
     // Basic validation
@@ -250,7 +233,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Validate blockchain
     if (!SUPPORTED_CHAINS[blockchain]) {
       return res.status(400).json({
         error: 'Unsupported blockchain',
@@ -266,7 +248,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Audit data
     auditData = {
       ...auditData,
       mode,
@@ -278,7 +259,7 @@ export default async function handler(req, res) {
 
     let circleApiKey = '';
 
-    // MODE 1: User's own API key (BYO)
+    // MODE 1: User's own API key (BYO) - NO RATE LIMITING
     if (mode === 'own-key') {
       if (!apiKey) {
         return res.status(400).json({ 
@@ -297,7 +278,6 @@ export default async function handler(req, res) {
 
       const keyHash = hashApiKey(apiKey);
       
-      // Check if key is revoked
       if (REVOKED_KEY_HASHES.includes(keyHash)) {
         auditLog({ ...auditData, event: 'revoked_key_attempt' });
         return res.status(403).json({
@@ -306,24 +286,11 @@ export default async function handler(req, res) {
         });
       }
 
-      // Light rate limiting for BYO mode (abuse prevention only)
-      // 1 claim per wallet per network per 24h
-      const walletHash = crypto.createHash('sha256').update(address + blockchain).digest('hex');
-      const walletLimit = checkRateLimit(`byo:wallet:${walletHash}`, 1, 24 * 60 * 60 * 1000);
-      
-      if (!walletLimit.allowed) {
-        auditLog({ ...auditData, event: 'byo_wallet_limit_exceeded' });
-        return res.status(429).json({
-          error: 'Wallet rate limit exceeded',
-          message: 'This wallet already claimed on this network in the last 24 hours',
-          resetTime: walletLimit.resetTime
-        });
-      }
-
+      // NO RATE LIMITING for BYO mode
+      // Let Circle enforce their own limits (5-10 claims/day, varies)
       circleApiKey = apiKey;
-      recordRateLimit(`byo:wallet:${walletHash}`);
     } 
-    // MODE 2: Default faucet (password protected, our keys)
+    // MODE 2: Default faucet - STRICT LIMITS
     else if (mode === 'default') {
       if (!password) {
         return res.status(400).json({ 
@@ -332,7 +299,6 @@ export default async function handler(req, res) {
         });
       }
 
-      // Validate password
       const inputHash = hashPassword(password);
       if (inputHash !== DEFAULT_PASSWORD_HASH) {
         auditLog({ ...auditData, event: 'invalid_password', ip: auditData.ipHash });
@@ -342,7 +308,6 @@ export default async function handler(req, res) {
         });
       }
 
-      // Get available API keys
       const apiKeys = getApiKeys();
       if (apiKeys.length === 0) {
         return res.status(503).json({ 
@@ -351,12 +316,10 @@ export default async function handler(req, res) {
         });
       }
 
-      // Rotate through keys
       const keyIndex = Math.floor(Date.now() / 10000) % apiKeys.length;
       circleApiKey = apiKeys[keyIndex];
 
       // STRICT rate limits for default mode
-      // 1. IP-based limit (3 per 24h)
       const ipHash = crypto.createHash('sha256').update(clientIp).digest('hex');
       const ipLimit = checkRateLimit(`ip:${ipHash}`, 3, 24 * 60 * 60 * 1000);
       
@@ -369,7 +332,6 @@ export default async function handler(req, res) {
         });
       }
 
-      // 2. Wallet-based limit (1 per network per 24h)
       const walletHash = crypto.createHash('sha256').update(address + blockchain).digest('hex');
       const walletLimit = checkRateLimit(`wallet:${walletHash}`, 1, 24 * 60 * 60 * 1000);
       
@@ -382,7 +344,6 @@ export default async function handler(req, res) {
         });
       }
       
-      // Record limits for default mode
       recordRateLimit(`ip:${ipHash}`);
       recordRateLimit(`wallet:${walletHash}`);
     } else {
@@ -419,7 +380,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Handle Circle API errors (including their rate limits)
+    // Handle Circle API errors
     auditLog({ 
       ...auditData, 
       event: 'circle_api_error',
