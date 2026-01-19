@@ -82,7 +82,7 @@ FAUCET_DISABLED=false
 **Option B: Manual Deploy**
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/circle-faucet.git
+git clone https://github.com/CryptoExplor/circle-faucet.git
 cd circle-faucet
 
 # Install Vercel CLI
