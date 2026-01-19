@@ -26,6 +26,11 @@ const CIRCLE_API_KEYS = process.env.CIRCLE_API_KEYS || '';
 const FAUCET_DISABLED = process.env.FAUCET_DISABLED === 'true';
 const REVOKED_KEY_HASHES = (process.env.REVOKED_API_KEY_HASHES || '').split(',').filter(Boolean);
 
+// Validate critical env vars on startup
+if (!DEFAULT_PASSWORD_HASH && !CIRCLE_API_KEYS) {
+  console.error('[FATAL] No password hash or API keys configured. Set DEFAULT_PASSWORD_HASH or CIRCLE_API_KEYS in environment variables.');
+}
+
 // Supported chains (strict validation)
 const SUPPORTED_CHAINS = {
   'ARC-TESTNET': 'ARC-TESTNET',
@@ -46,9 +51,9 @@ const getApiKeys = () => {
   return CIRCLE_API_KEYS.split(',').map(k => k.trim()).filter(k => k.length > 0);
 };
 
-// Secure password hashing
+// Secure password hashing (simplified - no salt needed for demo)
 const hashPassword = (password) => {
-  return crypto.createHash('sha256').update(password + 'SALT_HERE').digest('hex');
+  return crypto.createHash('sha256').update(password).digest('hex');
 };
 
 // Validate API key format
@@ -301,11 +306,22 @@ export default async function handler(req, res) {
         });
       }
 
-      circleApiKey = apiKey;
+      // Light rate limiting for BYO mode (abuse prevention only)
+      // 1 claim per wallet per network per 24h
+      const walletHash = crypto.createHash('sha256').update(address + blockchain).digest('hex');
+      const walletLimit = checkRateLimit(`byo:wallet:${walletHash}`, 1, 24 * 60 * 60 * 1000);
       
-      // NO RATE LIMITING for BYO mode
-      // Let Circle enforce their own limits (they vary: 5-10 claims/day)
-      // Users manage their own quota
+      if (!walletLimit.allowed) {
+        auditLog({ ...auditData, event: 'byo_wallet_limit_exceeded' });
+        return res.status(429).json({
+          error: 'Wallet rate limit exceeded',
+          message: 'This wallet already claimed on this network in the last 24 hours',
+          resetTime: walletLimit.resetTime
+        });
+      }
+
+      circleApiKey = apiKey;
+      recordRateLimit(`byo:wallet:${walletHash}`);
     } 
     // MODE 2: Default faucet (password protected, our keys)
     else if (mode === 'default') {
@@ -340,7 +356,7 @@ export default async function handler(req, res) {
       circleApiKey = apiKeys[keyIndex];
 
       // STRICT rate limits for default mode
-      // 1. IP-based limit
+      // 1. IP-based limit (3 per 24h)
       const ipHash = crypto.createHash('sha256').update(clientIp).digest('hex');
       const ipLimit = checkRateLimit(`ip:${ipHash}`, 3, 24 * 60 * 60 * 1000);
       
@@ -353,7 +369,7 @@ export default async function handler(req, res) {
         });
       }
 
-      // 2. Wallet-based limit
+      // 2. Wallet-based limit (1 per network per 24h)
       const walletHash = crypto.createHash('sha256').update(address + blockchain).digest('hex');
       const walletLimit = checkRateLimit(`wallet:${walletHash}`, 1, 24 * 60 * 60 * 1000);
       
