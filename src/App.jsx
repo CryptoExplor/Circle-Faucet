@@ -169,8 +169,8 @@ const CircleFaucet = () => {
             <div className="mt-2 flex items-start gap-2 text-xs text-gray-600 bg-gray-50 p-3 rounded-lg">
               <Info size={16} className="flex-shrink-0 mt-0.5" />
               <p>
-                <strong>Note:</strong> Claims are enforced by Circle per API key. 
-                This app does not limit your usage beyond basic abuse protection (1 claim per wallet per 24h).
+                <strong>Limits:</strong> 1 claim per wallet per network per 24h (basic abuse protection). 
+                Circle enforces their own per-key limits separately.
               </p>
             </div>
           </div>
@@ -187,7 +187,7 @@ const CircleFaucet = () => {
               className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-purple-600 focus:outline-none transition-colors"
             />
             <p className="mt-2 text-xs text-gray-600">
-              Contact admin for default faucet password. Limited to 3 claims per 24h per IP/wallet.
+              Contact admin for default faucet password. Limited to 3 claims per IP per 24h + 1 claim per wallet per network per 24h.
             </p>
           </div>
         )}
@@ -278,14 +278,14 @@ const CircleFaucet = () => {
               ) : (
                 <XCircle className="text-red-600 flex-shrink-0 mt-1" size={20} />
               )}
-              <div className="flex-1">
+              <div className="flex-1 min-w-0">
                 <p className={`font-semibold ${
                   result.type === 'success' ? 'text-green-900' : 'text-red-900'
                 }`}>
                   {result.message}
                 </p>
                 {result.details && (
-                  <p className="mt-2 text-sm text-gray-700 font-mono bg-black bg-opacity-5 p-2 rounded">
+                  <p className="mt-2 text-sm text-gray-700 font-mono bg-black bg-opacity-5 p-2 rounded break-all">
                     {result.details}
                   </p>
                 )}
@@ -301,8 +301,8 @@ const CircleFaucet = () => {
               <strong>Security:</strong> API keys are never stored. All requests are server-validated.
             </p>
             <p>
-              <strong>Limits:</strong> User keys: 1 claim per wallet per 24h (Circle enforces per-key limits) • 
-              Default faucet: 3 claims per 24h per IP/wallet
+              <strong>Limits:</strong> User keys: 1 claim per wallet per network per 24h (Circle may enforce additional per-key limits) • 
+              Default faucet: 3 claims per IP per 24h + 1 claim per wallet per network per 24h
             </p>
             <p>
               <strong>Need help?</strong> Visit{' '}
