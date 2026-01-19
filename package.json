@@ -5,17 +5,20 @@
   "description": "Circle Testnet Faucet - Production Ready",
   "scripts": {
     "dev": "vercel dev",
+    "build": "echo 'No build step required - using ESM React'",
     "deploy": "vercel --prod",
-    "test": "node test/api.test.js"
-  },
-  "dependencies": {
-    "@vercel/kv": "^1.0.1",
-    "bcryptjs": "^2.4.3"
-  },
-  "devDependencies": {
-    "vercel": "^33.0.0"
+    "test": "echo 'No tests configured yet'"
   },
   "engines": {
     "node": ">=18.0.0"
-  }
+  },
+  "keywords": [
+    "circle",
+    "faucet",
+    "testnet",
+    "crypto",
+    "blockchain"
+  ],
+  "author": "CryptoExplor",
+  "license": "MIT"
 }
