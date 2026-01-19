@@ -1,212 +1,350 @@
-# Circle Faucet Claimer - Vercel Deployment
+# Circle Faucet - Multi-Key Testnet Token Claimer
 
-A serverless web application for claiming testnet tokens from Circle's faucet on various blockchain networks including ARC-TESTNET, ETH-SEPOLIA, AVAX-FUJI, and more.
+A secure, serverless web application for claiming testnet tokens from Circle's faucet with support for user-provided API keys and a password-protected default faucet.
+
+## 🎯 Features
+
+- ✅ **Dual Mode Operation**
+  - Use your own Circle API key (5 claims/24h)
+  - Use default faucet with password protection (3 claims/24h)
+  
+- ✅ **Multi-Network Support**
+  - ARC-TESTNET, ETH-SEPOLIA, AVAX-FUJI, MATIC-AMOY
+  - SOL-DEVNET, ARB-SEPOLIA, UNI-SEPOLIA, BASE-SEPOLIA
+  - OP-SEPOLIA, APTOS-TESTNET
+
+- ✅ **Security Features**
+  - API key hashing (never stored in plain text)
+  - Password-protected default faucet
+  - Rate limiting per API key/IP/wallet
+  - Multiple API key rotation for default mode
+  - Emergency kill switch
+
+- ✅ **Rate Limiting**
+  - User API keys: 5 claims per 24 hours
+  - Default faucet: 3 claims per 24 hours per IP/wallet
+  - Client-side tracking with localStorage
+  - Server-side validation
 
 ## 🚀 Quick Deploy to Vercel
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/yourusername/circle-faucet-vercel)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/CryptoExplor/circle-faucet)
 
 ## 📁 Project Structure
 
 ```
-circle-faucet-vercel/
+circle-faucet/
 ├── api/
-│   └── claim.js          # Serverless API endpoint
+│   └── claim.js              # Serverless API endpoint with multi-key support
 ├── public/
-│   └── index.html        # Frontend UI
-├── vercel.json           # Vercel configuration
-├── package.json          # Node.js dependencies
-└── README.md            # This file
+│   ├── index.html            # Main UI (use React version instead)
+│   └── batch.html            # Batch claiming interface
+├── src/
+│   └── App.jsx               # React UI component
+├── .env.example              # Environment variables template
+├── vercel.json               # Vercel configuration
+├── package.json              # Dependencies
+└── README.md                 # This file
 ```
 
 ## 🛠️ Setup Instructions
 
-### Option 1: Deploy to Vercel (Recommended)
+### 1. Get Your Circle API Key
 
-1. **Fork/Clone this repository**
-   ```bash
-   git clone https://github.com/yourusername/circle-faucet-vercel.git
-   cd circle-faucet-vercel
-   ```
+1. Visit [Circle Developer Portal](https://developers.circle.com/w3s/circle-developer-account)
+2. Create a free developer account
+3. Generate a **Test API Key**
+4. Copy the key (format: `TEST_API_KEY:xxx:xxx`)
 
-2. **Push to your GitHub**
-   ```bash
-   git init
-   git add .
-   git commit -m "Initial commit"
-   git branch -M main
-   git remote add origin https://github.com/yourusername/circle-faucet-vercel.git
-   git push -u origin main
-   ```
+### 2. Environment Variables Setup
 
-3. **Deploy on Vercel**
-   - Go to [vercel.com](https://vercel.com)
-   - Click "New Project"
-   - Import your GitHub repository
-   - Add environment variable (optional but recommended):
-     - Name: `CIRCLE_API_KEY`
-     - Value: Your Circle API key (format: `TEST_API_KEY:xxx:xxx`)
-   - Click "Deploy"
+Create a `.env` file in the root directory:
 
-4. **Done!** Your app will be live at `https://your-project.vercel.app`
+```bash
+# Multiple Circle API keys for default faucet (comma-separated)
+CIRCLE_API_KEYS="TEST_API_KEY:xxx:xxx,TEST_API_KEY:yyy:yyy,TEST_API_KEY:zzz:zzz"
 
-### Option 2: Local Development
+# Default faucet password (hashed with SHA-256)
+# To generate: echo -n "your_password" | sha256sum
+DEFAULT_PASSWORD_HASH="your_password_hash_here"
 
-1. **Install dependencies**
-   ```bash
-   npm install
-   ```
+# Emergency kill switch (optional)
+FAUCET_DISABLED=false
+```
 
-2. **Create `.env` file** (optional)
-   ```bash
-   CIRCLE_API_KEY=TEST_API_KEY:your_key_here
-   ```
+### 3. Deploy to Vercel
 
-3. **Run locally with Vercel CLI**
-   ```bash
-   npm run dev
-   ```
+**Option A: One-Click Deploy**
+1. Click the "Deploy with Vercel" button above
+2. Add environment variables in Vercel dashboard
+3. Deploy!
 
-4. **Or run with Node.js**
-   ```bash
-   # Start the original server.js
-   node server.js
-   ```
+**Option B: Manual Deploy**
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/circle-faucet.git
+cd circle-faucet
 
-## 🔑 Setting Up Circle API Key
+# Install Vercel CLI
+npm install -g vercel
 
-### Get Your API Key:
-1. Go to [Circle Developer Portal](https://developers.circle.com)
-2. Create an account or sign in
-3. Generate a test API key
-4. Copy the full key (format: `TEST_API_KEY:xxx:xxx`)
+# Deploy
+vercel --prod
+```
 
-### Add to Vercel:
-1. Go to your Vercel project
+### 4. Configure Vercel Environment Variables
+
+1. Go to your Vercel project dashboard
 2. Settings → Environment Variables
-3. Add `CIRCLE_API_KEY` with your key
-4. Redeploy
+3. Add the following variables:
+   - `CIRCLE_API_KEYS`: Your comma-separated API keys
+   - `DEFAULT_PASSWORD_HASH`: SHA-256 hash of your password
+   - `FAUCET_DISABLED`: (optional) Set to `true` to disable faucet
 
-**Note:** The app includes a default test key for quick testing, but you should replace it with your own key for production use.
+## 🔐 Security Best Practices
 
-## 📝 Features
+### Password Hashing
 
-- ✅ Claim testnet tokens on 10+ blockchain networks
-- ✅ Support for Native, USDC, and EURC tokens
-- ✅ Rate limit tracking (24-hour cooldown per wallet/network)
-- ✅ Beautiful gradient UI with loading states
-- ✅ Detailed error messages and solutions
-- ✅ Fully serverless (no backend to maintain)
-- ✅ CORS-enabled API endpoint
-- ✅ Mobile responsive design
+Generate a secure password hash:
 
-## 🌐 Supported Networks
+```bash
+# Linux/Mac
+echo -n "your_secure_password" | sha256sum
 
-- ARC-TESTNET
-- ETH-SEPOLIA
-- AVAX-FUJI
-- MATIC-AMOY
-- SOL-DEVNET
-- ARB-SEPOLIA
-- UNI-SEPOLIA
-- BASE-SEPOLIA
-- OP-SEPOLIA
-- APTOS-TESTNET
+# Or use Node.js
+node -e "console.log(require('crypto').createHash('sha256').update('your_password').digest('hex'))"
+```
 
-## 🎯 Usage
+### API Key Management
 
-1. Enter your wallet address
-2. Select blockchain network
-3. Choose tokens to claim (Native, USDC, EURC)
-4. Click "Claim Tokens"
-5. Wait for confirmation
+- **Never commit API keys** to version control
+- Use separate keys for different environments
+- Rotate keys periodically
+- Monitor usage in Circle dashboard
+- Revoke compromised keys immediately
 
-**Rate Limits:**
-- 1 claim per 24 hours per wallet/network combination
-- IP-based rate limits may apply
-- The app tracks claims locally to prevent unnecessary API calls
+### Rate Limiting Strategy
 
-## 🔧 API Endpoint
+| Mode | Limit | Window | Identifier |
+|------|-------|--------|------------|
+| User API Key | 5 claims | 24 hours | Hashed API key |
+| Default Faucet | 3 claims | 24 hours | IP + Wallet |
 
-### `POST /api/claim`
+## 📖 Usage Guide
 
-**Request Body:**
+### For End Users
+
+**Option 1: Use Your Own API Key** (Recommended)
+1. Create a Circle developer account
+2. Generate your test API key
+3. Select "Use My API Key" mode
+4. Enter your API key
+5. Claim tokens (5 times per 24 hours)
+
+**Option 2: Use Default Faucet**
+1. Select "Use Default Faucet" mode
+2. Enter the faucet password (provided by admin)
+3. Claim tokens (3 times per 24 hours)
+
+### For Developers
+
+**Local Development**
+```bash
+# Install dependencies
+npm install
+
+# Run locally
+vercel dev
+
+# Test the API
+curl -X POST http://localhost:3000/api/claim \
+  -H "Content-Type: application/json" \
+  -d '{
+    "address": "0x...",
+    "blockchain": "ARC-TESTNET",
+    "native": true,
+    "usdc": true,
+    "mode": "own-key",
+    "apiKey": "TEST_API_KEY:xxx:xxx"
+  }'
+```
+
+## 🔧 API Documentation
+
+### Endpoint: `POST /api/claim`
+
+**Request Body (Own Key Mode)**
 ```json
 {
-  "address": "0x...",
+  "address": "0x1234...",
   "blockchain": "ARC-TESTNET",
   "native": true,
   "usdc": true,
-  "eurc": false
+  "eurc": false,
+  "mode": "own-key",
+  "apiKey": "TEST_API_KEY:xxx:xxx"
 }
 ```
 
-**Success Response:**
+**Request Body (Default Faucet Mode)**
 ```json
 {
-  "status": "success",
-  "transactionId": "...",
-  "nextClaimTime": "..."
+  "address": "0x1234...",
+  "blockchain": "ETH-SEPOLIA",
+  "native": false,
+  "usdc": true,
+  "eurc": false,
+  "mode": "default",
+  "password": "your_password"
 }
 ```
 
-**Error Response:**
+**Success Response (200)**
 ```json
 {
-  "code": 5,
-  "message": "API rate limit error"
+  "success": true,
+  "message": "Tokens claimed successfully",
+  "data": { ... },
+  "remaining": 4
+}
+```
+
+**Error Responses**
+
+| Code | Error | Description |
+|------|-------|-------------|
+| 400 | Bad Request | Missing or invalid parameters |
+| 401 | Unauthorized | Invalid password |
+| 429 | Too Many Requests | Rate limit exceeded |
+| 503 | Service Unavailable | Faucet disabled |
+
+## 🎨 Customization
+
+### Update Supported Networks
+
+Edit the networks array in the UI:
+
+```javascript
+const networks = [
+  'ARC-TESTNET',
+  'ETH-SEPOLIA',
+  // Add more networks here
+];
+```
+
+### Modify Rate Limits
+
+In `api/claim.js`:
+
+```javascript
+// User API key limit
+const rateCheck = checkRateLimit(rateLimitIdentifier, 5, 24);
+
+// Default faucet limit
+const rateCheck = checkRateLimit(rateLimitIdentifier, 3, 24);
+```
+
+### Emergency Disable
+
+Set environment variable:
+```bash
+FAUCET_DISABLED=true
+```
+
+Or programmatically in `api/claim.js`:
+```javascript
+if (process.env.FAUCET_DISABLED === 'true') {
+  return res.status(503).json({ 
+    error: 'Faucet temporarily disabled'
+  });
 }
 ```
 
 ## 🐛 Troubleshooting
 
-### Rate Limit Errors
-- Wait 24 hours before claiming again with the same wallet
+### Common Issues
+
+**1. "Invalid API key format"**
+- Ensure your key starts with `TEST_API_KEY:`
+- Check for extra spaces or line breaks
+- Verify you copied the entire key
+
+**2. "Rate limit exceeded"**
+- Wait 24 hours for the limit to reset
+- Use a different API key
 - Try a different wallet address
-- Try a different blockchain network
 
-### Connection Errors
-- Check if your API key is set correctly
-- Verify the API endpoint is accessible
-- Check Vercel function logs for errors
+**3. "Password incorrect"**
+- Verify your password hash is correct
+- Regenerate hash if needed
+- Check for typos in environment variable
 
-### CORS Errors
-- The API is configured with CORS headers
-- Make sure you're using the correct endpoint
-- Check `vercel.json` configuration
+**4. "No API keys configured"**
+- Add `CIRCLE_API_KEYS` to Vercel environment
+- Ensure keys are comma-separated
+- Redeploy after adding variables
 
-## 📦 Dependencies
+### Debug Mode
 
-- Node.js built-in `https` module (no external dependencies)
-- Vercel for serverless deployment
-- Modern browser with localStorage support
+Enable logging in `api/claim.js`:
 
-## 🔒 Security Notes
+```javascript
+console.log('Request:', req.body);
+console.log('Rate limit check:', rateCheck);
+console.log('Circle response:', circleResponse);
+```
 
-- API keys are stored as environment variables (never committed to git)
-- Frontend makes requests to your own API endpoint
-- Rate limiting prevents abuse
-- All requests go through your Vercel serverless function
+View logs:
+```bash
+vercel logs <deployment-url>
+```
 
-## 📄 License
+## 📊 Monitoring
 
-MIT License - feel free to use and modify for your projects!
+### Track Usage
+
+Monitor your Circle API usage in the [Circle Dashboard](https://console.circle.com/)
+
+### Analytics
+
+Track claims with the built-in localStorage system:
+
+```javascript
+const history = JSON.parse(localStorage.getItem('circleFaucetHistory'));
+console.log('Total claims:', Object.keys(history).length);
+```
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Please:
 
-## 📞 Support
+1. Fork the repository
+2. Create a feature branch
+3. Commit your changes
+4. Push to the branch
+5. Open a Pull Request
 
-For issues related to:
-- Circle API: [Circle Developer Docs](https://developers.circle.com)
-- Vercel Deployment: [Vercel Documentation](https://vercel.com/docs)
-- This App: Open an issue on GitHub
+## 📄 License
 
-## 🎉 Credits
+MIT License - see [LICENSE](LICENSE) file for details
 
-Built with Circle's Faucet API for testnet token distribution.
+## 🔗 Links
+
+- [Circle Developer Docs](https://developers.circle.com/)
+- [Circle API Reference](https://developers.circle.com/w3s/reference)
+- [Vercel Documentation](https://vercel.com/docs)
+- [Support](https://github.com/yourusername/circle-faucet/issues)
+
+## ⚠️ Important Notes
+
+- **Test API keys only**: This faucet is for testnet tokens only
+- **Rate limits**: Respect Circle's rate limits to avoid suspension
+- **Security**: Never expose API keys in client-side code
+- **Monitoring**: Regularly check for abuse and suspicious activity
+- **Updates**: Keep dependencies updated for security patches
 
 ---
 
-**Happy Testing! 🚀**
+**Built with ❤️ using Circle's Faucet API**
+
+Need help? [Open an issue](https://github.com/yourusername/circle-faucet/issues)
