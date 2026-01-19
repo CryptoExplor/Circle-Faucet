@@ -1,23 +1,21 @@
 {
-  "name": "circle-faucet-vercel",
-  "version": "1.0.0",
+  "name": "circle-faucet",
+  "version": "2.0.0",
   "type": "module",
-  "description": "Circle Testnet Faucet Claimer - Vercel Deployment",
+  "description": "Circle Testnet Faucet - Production Ready",
   "scripts": {
     "dev": "vercel dev",
-    "deploy": "vercel --prod"
+    "deploy": "vercel --prod",
+    "test": "node test/api.test.js"
   },
-  "keywords": [
-    "circle",
-    "faucet",
-    "testnet",
-    "arc",
-    "blockchain"
-  ],
-  "author": "",
-  "license": "MIT",
-  "dependencies": {},
+  "dependencies": {
+    "@vercel/kv": "^1.0.1",
+    "bcryptjs": "^2.4.3"
+  },
   "devDependencies": {
     "vercel": "^33.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
