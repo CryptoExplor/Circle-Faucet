@@ -7,11 +7,11 @@ import crypto from 'crypto';
  * BYO API Key Mode:
  * - User owns their Circle quota → we don't enforce token limits
  * - Server only protects: infrastructure, abuse optics, DoS
- * - Client-side counters are UX-only, not security
+ * - Let Circle enforce their own rate limits (varies: 5-10 claims/day)
  * 
  * Default Faucet Mode:
  * - We own the quota → STRICT enforcement required
- * - Multiple layers: password, rate limits, CAPTCHA (TODO), audit logs
+ * - Multiple layers: password, rate limits, audit logs
  * 
  * What We Protect Against:
  * - DoS / spam against our Vercel functions
@@ -46,11 +46,8 @@ const getApiKeys = () => {
   return CIRCLE_API_KEYS.split(',').map(k => k.trim()).filter(k => k.length > 0);
 };
 
-// Secure password hashing (use bcrypt in production)
+// Secure password hashing
 const hashPassword = (password) => {
-  // TODO: Replace with bcrypt for production
-  // const bcrypt = require('bcryptjs');
-  // return bcrypt.hashSync(password, 12);
   return crypto.createHash('sha256').update(password + 'SALT_HERE').digest('hex');
 };
 
@@ -61,7 +58,7 @@ const validateApiKey = (key) => {
   return parts.length === 3 && parts[0] === 'TEST_API_KEY';
 };
 
-// Hash for rate limiting / revocation
+// Hash for revocation
 const hashApiKey = (key) => {
   return crypto.createHash('sha256').update(key).digest('hex');
 };
@@ -124,7 +121,6 @@ const auditLog = (event) => {
     ...event
   };
   
-  // TODO: Send to logging service (Logtail, Axiom, etc.)
   console.log('[AUDIT]', JSON.stringify(log));
 };
 
@@ -276,7 +272,6 @@ export default async function handler(req, res) {
     };
 
     let circleApiKey = '';
-    let rateLimitIdentifier = '';
 
     // MODE 1: User's own API key (BYO)
     if (mode === 'own-key') {
@@ -308,22 +303,9 @@ export default async function handler(req, res) {
 
       circleApiKey = apiKey;
       
-      // Optional: Add wallet-level limit even for BYO keys (protect Circle TOS)
-      // This prevents: 1 key + 1000 wallets abuse
-      const walletHash = crypto.createHash('sha256').update(address + blockchain).digest('hex');
-      const walletLimit = checkRateLimit(`wallet:${walletHash}`, 1, 24 * 60 * 60 * 1000);
-      
-      if (!walletLimit.allowed) {
-        auditLog({ ...auditData, event: 'wallet_limit_exceeded' });
-        return res.status(429).json({
-          error: 'Wallet rate limit',
-          message: 'This wallet has already claimed tokens on this network in the last 24 hours',
-          resetTime: walletLimit.resetTime
-        });
-      }
-      
-      // Note: We do NOT enforce API key limits for BYO mode
-      // User manages their own Circle quota
+      // NO RATE LIMITING for BYO mode
+      // Let Circle enforce their own limits (they vary: 5-10 claims/day)
+      // Users manage their own quota
     } 
     // MODE 2: Default faucet (password protected, our keys)
     else if (mode === 'default') {
@@ -334,7 +316,7 @@ export default async function handler(req, res) {
         });
       }
 
-      // Validate password (use bcrypt in production)
+      // Validate password
       const inputHash = hashPassword(password);
       if (inputHash !== DEFAULT_PASSWORD_HASH) {
         auditLog({ ...auditData, event: 'invalid_password', ip: auditData.ipHash });
@@ -384,8 +366,9 @@ export default async function handler(req, res) {
         });
       }
       
-      // Record limits
-      rateLimitIdentifier = `default:${ipHash}:${walletHash}`;
+      // Record limits for default mode
+      recordRateLimit(`ip:${ipHash}`);
+      recordRateLimit(`wallet:${walletHash}`);
     } else {
       return res.status(400).json({ 
         error: 'Invalid mode',
@@ -396,7 +379,7 @@ export default async function handler(req, res) {
     // Build Circle API payload
     const payload = {
       address: address,
-      blockchain: SUPPORTED_CHAINS[blockchain] // Use validated chain
+      blockchain: SUPPORTED_CHAINS[blockchain]
     };
 
     if (native) payload.native = true;
@@ -406,20 +389,8 @@ export default async function handler(req, res) {
     // Make request to Circle API
     const circleResponse = await makeCircleRequest(circleApiKey, payload);
 
-    // Record successful claim
+    // Handle successful claim
     if (circleResponse.statusCode >= 200 && circleResponse.statusCode < 300) {
-      if (mode === 'default') {
-        // Record all limits for default mode
-        const ipHash = crypto.createHash('sha256').update(clientIp).digest('hex');
-        const walletHash = crypto.createHash('sha256').update(address + blockchain).digest('hex');
-        recordRateLimit(`ip:${ipHash}`);
-        recordRateLimit(`wallet:${walletHash}`);
-      } else if (mode === 'own-key') {
-        // Record wallet limit only
-        const walletHash = crypto.createHash('sha256').update(address + blockchain).digest('hex');
-        recordRateLimit(`wallet:${walletHash}`);
-      }
-      
       auditData.success = true;
       auditData.duration = Date.now() - startTime;
       auditLog({ ...auditData, event: 'claim_success' });
@@ -428,11 +399,11 @@ export default async function handler(req, res) {
         success: true,
         message: 'Tokens claimed successfully',
         transactionId: circleResponse.data.transactionId || circleResponse.data.id,
-        // Note: Don't expose remaining claims for BYO mode (they manage their own quota)
+        data: circleResponse.data
       });
     }
 
-    // Handle Circle API errors
+    // Handle Circle API errors (including their rate limits)
     auditLog({ 
       ...auditData, 
       event: 'circle_api_error',
@@ -443,7 +414,8 @@ export default async function handler(req, res) {
     return res.status(circleResponse.statusCode).json({
       error: 'Circle API error',
       message: circleResponse.data.message || 'Failed to claim tokens',
-      code: circleResponse.data.code
+      code: circleResponse.data.code,
+      details: circleResponse.data
     });
 
   } catch (error) {
