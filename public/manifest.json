@@ -1,0 +1,21 @@
+{
+  "name": "Circle Faucet",
+  "short_name": "Circle Faucet",
+  "description": "Claim testnet tokens on multiple networks",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#667eea",
+  "background_color": "#ffffff",
+  "icons": [
+    {
+      "src": "/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "/favicon.png",
+      "sizes": "32x32",
+      "type": "image/png"
+    }
+  ]
+}
