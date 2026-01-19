@@ -4,9 +4,5 @@
       "memory": 1024,
       "maxDuration": 10
     }
-  },
-  "env": {
-    "CIRCLE_API_KEYS": "@circle_api_keys",
-    "DEFAULT_PASSWORD_HASH": "@default_password_hash"
   }
 }
