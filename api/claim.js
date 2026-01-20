@@ -12,7 +12,7 @@ import crypto from 'crypto';
  * 
  * Default Faucet Mode:
  * - We own the quota → STRICT enforcement required
- * - IP-based: 3 claims per 24h
+ * - IP-based: 5 claims per 24h
  * - Wallet-based: 1 claim per network per 24h
  */
 
@@ -321,7 +321,7 @@ export default async function handler(req, res) {
 
       // STRICT rate limits for default mode
       const ipHash = crypto.createHash('sha256').update(clientIp).digest('hex');
-      const ipLimit = checkRateLimit(`ip:${ipHash}`, 3, 24 * 60 * 60 * 1000);
+      const ipLimit = checkRateLimit(`ip:${ipHash}`, 5, 24 * 60 * 60 * 1000);
       
       if (!ipLimit.allowed) {
         auditLog({ ...auditData, event: 'ip_limit_exceeded' });
