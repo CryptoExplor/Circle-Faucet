@@ -1,12 +1,12 @@
 # Circle Faucet - Multi-Key Testnet Token Claimer
 
-A secure, serverless web application for claiming testnet tokens from Circle's faucet with support for user-provided API keys and a password-protected default faucet.
+A secure, serverless web application for claiming testnet tokens from Circle's faucet with support for user-provided API keys and a password-protected default faucet with smart key rotation.
 
 ## 🎯 Features
 
 - ✅ **Dual Mode Operation**
-  - Use your own Circle API key (5 claims/24h)
-  - Use default faucet with password protection (3 claims/24h)
+  - Use your own Circle API key (unlimited claims, subject to Circle's limits)
+  - Use default faucet with password protection (1 claim per wallet/network per 24h)
   
 - ✅ **Multi-Network Support**
   - ARC-TESTNET, ETH-SEPOLIA, AVAX-FUJI, MATIC-AMOY
@@ -16,15 +16,43 @@ A secure, serverless web application for claiming testnet tokens from Circle's f
 - ✅ **Security Features**
   - API key hashing (never stored in plain text)
   - Password-protected default faucet
-  - Rate limiting per API key/IP/wallet
-  - Multiple API key rotation for default mode
+  - Rate limiting per wallet/network
+  - **Round-robin API key rotation** for load balancing
   - Emergency kill switch
 
+- ✅ **Smart Key Management**
+  - Round-robin rotation: Each claim uses the next API key in sequence
+  - Automatic cycling when a key reaches the end of the list
+  - Load distribution across multiple API keys
+  - Maximizes daily claim capacity
+
 - ✅ **Rate Limiting**
-  - User API keys: 5 claims per 24 hours
-  - Default faucet: 3 claims per 24 hours per IP/wallet
-  - Client-side tracking with localStorage
-  - Server-side validation
+  - User API keys: No limit from our side (Circle enforces 5-10 claims/day)
+  - Default faucet: 1 claim per wallet per network per 24 hours
+  - Infrastructure DoS protection: 100 requests per hour per IP
+
+## 🔄 How Key Rotation Works
+
+The default faucet uses a **round-robin rotation strategy**:
+
+1. **First claim** → Uses API Key #1
+2. **Second claim** → Uses API Key #2
+3. **Third claim** → Uses API Key #3
+4. **Fourth claim** → Cycles back to API Key #1
+5. And so on...
+
+**Benefits:**
+- Distributes load evenly across all keys
+- Maximizes daily claim capacity (if you have 3 keys with 10 claims/day each = 30 total claims/day)
+- No single key gets exhausted quickly
+- Automatic failover if one key hits Circle's limit
+
+**Example with 3 API keys:**
+```
+Claim 1: Key A → Claim 4: Key A → Claim 7: Key A
+Claim 2: Key B → Claim 5: Key B → Claim 8: Key B
+Claim 3: Key C → Claim 6: Key C → Claim 9: Key C
+```
 
 ## 🚀 Quick Deploy to Vercel
 
@@ -35,12 +63,10 @@ A secure, serverless web application for claiming testnet tokens from Circle's f
 ```
 circle-faucet/
 ├── api/
-│   └── claim.js              # Serverless API endpoint with multi-key support
+│   └── claim.js              # Serverless API with round-robin key rotation
 ├── public/
-│   ├── index.html            # Main UI (use React version instead)
+│   ├── index.html            # Main UI
 │   └── batch.html            # Batch claiming interface
-├── src/
-│   └── App.jsx               # React UI component
 ├── .env.example              # Environment variables template
 ├── vercel.json               # Vercel configuration
 ├── package.json              # Dependencies
@@ -49,19 +75,20 @@ circle-faucet/
 
 ## 🛠️ Setup Instructions
 
-### 1. Get Your Circle API Key
+### 1. Get Your Circle API Keys
 
 1. Visit [Circle Developer Portal](https://developers.circle.com/w3s/circle-developer-account)
 2. Create a free developer account
-3. Generate a **Test API Key**
-4. Copy the key (format: `TEST_API_KEY:xxx:xxx`)
+3. Generate **multiple Test API Keys** (recommended: 3-5 keys for better distribution)
+4. Copy the keys (format: `TEST_API_KEY:xxx:xxx`)
 
 ### 2. Environment Variables Setup
 
 Create a `.env` file in the root directory:
 
 ```bash
-# Multiple Circle API keys for default faucet (comma-separated)
+# Multiple Circle API keys for round-robin rotation (comma-separated)
+# More keys = more daily claim capacity!
 CIRCLE_API_KEYS="TEST_API_KEY:xxx:xxx,TEST_API_KEY:yyy:yyy,TEST_API_KEY:zzz:zzz"
 
 # Default faucet password (hashed with SHA-256)
@@ -117,6 +144,7 @@ node -e "console.log(require('crypto').createHash('sha256').update('your_passwor
 
 ### API Key Management
 
+- **Use multiple keys** (3-5 recommended) for better load distribution
 - **Never commit API keys** to version control
 - Use separate keys for different environments
 - Rotate keys periodically
@@ -125,10 +153,11 @@ node -e "console.log(require('crypto').createHash('sha256').update('your_passwor
 
 ### Rate Limiting Strategy
 
-| Mode | Limit | Window | Identifier |
-|------|-------|--------|------------|
-| User API Key | 5 claims | 24 hours | Hashed API key |
-| Default Faucet | 3 claims | 24 hours | IP + Wallet |
+| Mode | Limit | Window | Identifier | Key Usage |
+|------|-------|--------|------------|-----------|
+| User API Key | Circle's limit (5-10/day) | 24 hours | User's key | Single key |
+| Default Faucet | 1 claim per wallet/network | 24 hours | Wallet + Network | Round-robin rotation |
+| Infrastructure | 100 requests | 1 hour | IP address | All modes |
 
 ## 📖 Usage Guide
 
@@ -139,12 +168,12 @@ node -e "console.log(require('crypto').createHash('sha256').update('your_passwor
 2. Generate your test API key
 3. Select "Use My API Key" mode
 4. Enter your API key
-5. Claim tokens (5 times per 24 hours)
+5. Claim unlimited tokens (subject to Circle's per-key limits)
 
 **Option 2: Use Default Faucet**
 1. Select "Use Default Faucet" mode
 2. Enter the faucet password (provided by admin)
-3. Claim tokens (3 times per 24 hours)
+3. Claim tokens (1 time per wallet per network per 24 hours)
 
 ### For Developers
 
@@ -204,8 +233,8 @@ curl -X POST http://localhost:3000/api/claim \
 {
   "success": true,
   "message": "Tokens claimed successfully",
-  "data": { ... },
-  "remaining": 4
+  "transactionId": "...",
+  "data": { ... }
 }
 ```
 
@@ -220,28 +249,30 @@ curl -X POST http://localhost:3000/api/claim \
 
 ## 🎨 Customization
 
-### Update Supported Networks
+### Add More API Keys
 
-Edit the networks array in the UI:
+Simply add them to your environment variable:
 
-```javascript
-const networks = [
-  'ARC-TESTNET',
-  'ETH-SEPOLIA',
-  // Add more networks here
-];
+```bash
+# Add as many keys as you want (comma-separated)
+CIRCLE_API_KEYS="KEY1,KEY2,KEY3,KEY4,KEY5"
 ```
+
+The system will automatically:
+- Detect all keys
+- Distribute claims evenly
+- Cycle through them in order
 
 ### Modify Rate Limits
 
 In `api/claim.js`:
 
 ```javascript
-// User API key limit
-const rateCheck = checkRateLimit(rateLimitIdentifier, 5, 24);
+// Wallet-based rate limit (default: 1 claim per 24h)
+const walletLimit = checkRateLimit(`wallet:${walletHash}`, 1, 24 * 60 * 60 * 1000);
 
-// Default faucet limit
-const rateCheck = checkRateLimit(rateLimitIdentifier, 3, 24);
+// To allow 3 claims per wallet per 24h:
+const walletLimit = checkRateLimit(`wallet:${walletHash}`, 3, 24 * 60 * 60 * 1000);
 ```
 
 ### Emergency Disable
@@ -249,15 +280,6 @@ const rateCheck = checkRateLimit(rateLimitIdentifier, 3, 24);
 Set environment variable:
 ```bash
 FAUCET_DISABLED=true
-```
-
-Or programmatically in `api/claim.js`:
-```javascript
-if (process.env.FAUCET_DISABLED === 'true') {
-  return res.status(503).json({ 
-    error: 'Faucet temporarily disabled'
-  });
-}
 ```
 
 ## 🐛 Troubleshooting
@@ -270,9 +292,9 @@ if (process.env.FAUCET_DISABLED === 'true') {
 - Verify you copied the entire key
 
 **2. "Rate limit exceeded"**
-- Wait 24 hours for the limit to reset
-- Use a different API key
-- Try a different wallet address
+- Default faucet: Wait 24 hours or try a different wallet
+- Own key mode: You've hit Circle's per-key limit (5-10 claims/day)
+- Solution: Use multiple API keys or wait for reset
 
 **3. "Password incorrect"**
 - Verify your password hash is correct
@@ -284,19 +306,14 @@ if (process.env.FAUCET_DISABLED === 'true') {
 - Ensure keys are comma-separated
 - Redeploy after adding variables
 
-### Debug Mode
+### Key Rotation Debugging
 
-Enable logging in `api/claim.js`:
+Check logs to see which key is being used:
 
-```javascript
-console.log('Request:', req.body);
-console.log('Rate limit check:', rateCheck);
-console.log('Circle response:', circleResponse);
 ```
-
-View logs:
-```bash
-vercel logs <deployment-url>
+[KEY_ROTATION] Using key 0 of 3, next will be 1
+[KEY_ROTATION] Using key 1 of 3, next will be 2
+[KEY_ROTATION] Using key 2 of 3, next will be 0
 ```
 
 ## 📊 Monitoring
@@ -305,13 +322,20 @@ vercel logs <deployment-url>
 
 Monitor your Circle API usage in the [Circle Dashboard](https://console.circle.com/)
 
-### Analytics
+**Benefits of Multiple Keys:**
+- See usage distributed across all keys
+- Know which keys are approaching limits
+- Replace exhausted keys without downtime
 
-Track claims with the built-in localStorage system:
+### Daily Capacity Calculation
 
-```javascript
-const history = JSON.parse(localStorage.getItem('circleFaucetHistory'));
-console.log('Total claims:', Object.keys(history).length);
+```
+Total Daily Capacity = Number of Keys × Claims per Key
+
+Example:
+- 3 API keys
+- Each key allows ~10 claims/day
+- Total capacity: 3 × 10 = 30 claims/day
 ```
 
 ## 🤝 Contributing
@@ -338,10 +362,12 @@ MIT License - see [LICENSE](LICENSE) file for details
 ## ⚠️ Important Notes
 
 - **Test API keys only**: This faucet is for testnet tokens only
-- **Rate limits**: Respect Circle's rate limits to avoid suspension
+- **Rate limits**: Circle enforces per-key limits (5-10 claims/day varies by network)
+- **Key rotation**: Each claim uses the next key in sequence for optimal distribution
 - **Security**: Never expose API keys in client-side code
 - **Monitoring**: Regularly check for abuse and suspicious activity
 - **Updates**: Keep dependencies updated for security patches
+- **Scalability**: Add more keys to increase daily claim capacity
 
 ---
 
