@@ -2,18 +2,15 @@ import https from 'https';
 import crypto from 'crypto';
 
 /**
- * UPDATED RATE LIMITING STRATEGY
+ * RATE LIMITING STRATEGY
  * 
  * BYO API Key Mode:
  * - NO rate limiting from our side
  * - Circle enforces their own limits (5-10 claims/day, varies)
- * - Users can switch keys when they hit Circle's limit
- * - We only protect infrastructure (100 req/hour per IP)
  * 
  * Default Faucet Mode:
- * - Wallet-based: 1 claim per network per 24h (prevents wallet spam)
+ * - Wallet-based: 1 claim per network per 24h
  * - Time-based key rotation every ~10 seconds
- * - Circle enforces their own per-key limits
  * - Infrastructure DoS protection (100 req/hour per IP)
  */
 
@@ -22,11 +19,6 @@ const DEFAULT_PASSWORD_HASH = process.env.DEFAULT_PASSWORD_HASH || '';
 const CIRCLE_API_KEYS = process.env.CIRCLE_API_KEYS || '';
 const FAUCET_DISABLED = process.env.FAUCET_DISABLED === 'true';
 const REVOKED_KEY_HASHES = (process.env.REVOKED_API_KEY_HASHES || '').split(',').filter(Boolean);
-
-// Validate critical env vars on startup
-if (!DEFAULT_PASSWORD_HASH && !CIRCLE_API_KEYS) {
-  console.error('[FATAL] No password hash or API keys configured.');
-}
 
 // Supported chains
 const SUPPORTED_CHAINS = {
@@ -40,7 +32,6 @@ const SUPPORTED_CHAINS = {
   'BASE-SEPOLIA': 'BASE-SEPOLIA',
   'OP-SEPOLIA': 'OP-SEPOLIA',
   'APTOS-TESTNET': 'APTOS-TESTNET'
-  'MONAD-TESTNET': 'MONAD-TESTNET'
 };
 
 const getApiKeys = () => {
@@ -62,7 +53,7 @@ const hashApiKey = (key) => {
   return crypto.createHash('sha256').update(key).digest('hex');
 };
 
-// Infrastructure DoS protection and wallet rate limiting
+// Rate limiting stores
 const requestCountStore = new Map();
 const rateLimitStore = new Map();
 
@@ -95,7 +86,7 @@ const recordRateLimit = (identifier) => {
 
 const checkInfraLimit = (ip) => {
   const now = Date.now();
-  const windowStart = now - (60 * 60 * 1000); // 1 hour window
+  const windowStart = now - (60 * 60 * 1000);
   
   const requests = (requestCountStore.get(ip) || []).filter(t => t > windowStart);
   requestCountStore.set(ip, requests);
@@ -195,11 +186,12 @@ export default async function handler(req, res) {
       });
     }
 
-    // Infrastructure DoS protection (100 req/hour per IP)
+    // Get client IP
     const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || 
                      req.headers['x-real-ip'] || 
                      'unknown';
     
+    // Infrastructure DoS protection
     const infraCheck = checkInfraLimit(clientIp);
     if (!infraCheck.allowed) {
       auditLog({
@@ -214,16 +206,21 @@ export default async function handler(req, res) {
       });
     }
 
-    let { address, blockchain, native, usdc, eurc, apiKey, password, mode } = req.body;
+    // Parse and validate request body
+    let { address, blockchain, native, usdc, eurc, apiKey, password, mode } = req.body || {};
+
+    // Log request (without sensitive data)
+    console.log('[REQUEST]', { 
+      address: address?.substring(0, 10) + '...', 
+      blockchain, 
+      mode,
+      tokens: { native, usdc, eurc }
+    });
 
     // Remove sensitive data from logging
     if (apiKey) {
       const keyHash = hashApiKey(apiKey);
       auditData.apiKeyHash = keyHash.substring(0, 16);
-      delete req.body.apiKey;
-    }
-    if (password) {
-      delete req.body.password;
     }
 
     // Basic validation
@@ -260,7 +257,7 @@ export default async function handler(req, res) {
 
     let circleApiKey = '';
 
-    // MODE 1: User's own API key (BYO) - NO RATE LIMITING
+    // MODE 1: User's own API key
     if (mode === 'own-key') {
       if (!apiKey) {
         return res.status(400).json({ 
@@ -287,11 +284,9 @@ export default async function handler(req, res) {
         });
       }
 
-      // NO RATE LIMITING for BYO mode
-      // Let Circle enforce their own limits (5-10 claims/day, varies)
       circleApiKey = apiKey;
     } 
-    // MODE 2: Default faucet - NO APP-SIDE RATE LIMITS
+    // MODE 2: Default faucet
     else if (mode === 'default') {
       if (!password) {
         return res.status(400).json({ 
@@ -311,17 +306,18 @@ export default async function handler(req, res) {
 
       const apiKeys = getApiKeys();
       if (apiKeys.length === 0) {
+        console.error('[ERROR] No Circle API keys configured');
         return res.status(503).json({ 
           error: 'No API keys configured',
           message: 'Default faucet is not available. Please use your own API key.'
         });
       }
 
-      // Time-based key rotation (changes every ~10 seconds)
+      // Time-based key rotation
       const keyIndex = Math.floor(Date.now() / 10000) % apiKeys.length;
       circleApiKey = apiKeys[keyIndex];
 
-      // Wallet-based rate limit: 1 claim per network per 24 hours
+      // Wallet-based rate limit
       const walletHash = crypto.createHash('sha256').update(address + blockchain).digest('hex');
       const walletLimit = checkRateLimit(`wallet:${walletHash}`, 1, 24 * 60 * 60 * 1000);
       
@@ -352,8 +348,12 @@ export default async function handler(req, res) {
     if (usdc) payload.usdc = true;
     if (eurc) payload.eurc = true;
 
+    console.log('[CIRCLE_REQUEST]', { blockchain: payload.blockchain, tokens: { native, usdc, eurc } });
+
     // Make request to Circle API
     const circleResponse = await makeCircleRequest(circleApiKey, payload);
+
+    console.log('[CIRCLE_RESPONSE]', { statusCode: circleResponse.statusCode });
 
     // Handle successful claim
     if (circleResponse.statusCode >= 200 && circleResponse.statusCode < 300) {
@@ -385,16 +385,18 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
-    console.error('Error:', error);
+    console.error('[FATAL_ERROR]', error);
     auditLog({ 
       ...auditData, 
       event: 'internal_error',
-      error: error.message 
+      error: error.message,
+      stack: error.stack
     });
     
     return res.status(500).json({ 
       error: 'Internal server error',
-      message: 'An unexpected error occurred. Please try again.'
+      message: 'An unexpected error occurred. Please try again.',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 }
