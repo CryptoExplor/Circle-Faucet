@@ -10,7 +10,7 @@ import crypto from 'crypto';
  * 
  * Default Faucet Mode:
  * - Wallet-based: 1 claim per network per 24h
- * - Time-based key rotation every ~10 seconds
+ * - Round-robin key rotation: Each claim uses next key in sequence
  * - Infrastructure DoS protection (100 req/hour per IP)
  */
 
@@ -34,9 +34,27 @@ const SUPPORTED_CHAINS = {
   'APTOS-TESTNET': 'APTOS-TESTNET'
 };
 
+// Round-robin key rotation state
+let currentKeyIndex = 0;
+
 const getApiKeys = () => {
   if (!CIRCLE_API_KEYS) return [];
   return CIRCLE_API_KEYS.split(',').map(k => k.trim()).filter(k => k.length > 0);
+};
+
+const getNextApiKey = () => {
+  const apiKeys = getApiKeys();
+  if (apiKeys.length === 0) return null;
+  
+  // Get current key
+  const key = apiKeys[currentKeyIndex];
+  
+  // Move to next key for next request
+  currentKeyIndex = (currentKeyIndex + 1) % apiKeys.length;
+  
+  console.log(`[KEY_ROTATION] Using key ${currentKeyIndex} of ${apiKeys.length}, next will be ${(currentKeyIndex + 1) % apiKeys.length}`);
+  
+  return key;
 };
 
 const hashPassword = (password) => {
@@ -313,9 +331,14 @@ export default async function handler(req, res) {
         });
       }
 
-      // Time-based key rotation
-      const keyIndex = Math.floor(Date.now() / 10000) % apiKeys.length;
-      circleApiKey = apiKeys[keyIndex];
+      // Round-robin key rotation
+      circleApiKey = getNextApiKey();
+      if (!circleApiKey) {
+        return res.status(503).json({ 
+          error: 'No API keys available',
+          message: 'Default faucet is temporarily unavailable.'
+        });
+      }
 
       // Wallet-based rate limit
       const walletHash = crypto.createHash('sha256').update(address + blockchain).digest('hex');
