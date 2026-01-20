@@ -11,9 +11,10 @@ import crypto from 'crypto';
  * - We only protect infrastructure (100 req/hour per IP)
  * 
  * Default Faucet Mode:
- * - We own the quota → STRICT enforcement required
- * - IP-based: 10 claims per 24h
- * - Wallet-based: 1 claim per network per 24h
+ * - Wallet-based: 1 claim per network per 24h (prevents wallet spam)
+ * - Time-based key rotation every ~10 seconds
+ * - Circle enforces their own per-key limits
+ * - Infrastructure DoS protection (100 req/hour per IP)
  */
 
 // Environment variables
@@ -60,9 +61,9 @@ const hashApiKey = (key) => {
   return crypto.createHash('sha256').update(key).digest('hex');
 };
 
-// Simple in-memory rate limiter
-const rateLimitStore = new Map();
+// Infrastructure DoS protection and wallet rate limiting
 const requestCountStore = new Map();
+const rateLimitStore = new Map();
 
 const checkRateLimit = (identifier, limit, windowMs) => {
   const now = Date.now();
@@ -91,10 +92,9 @@ const recordRateLimit = (identifier) => {
   rateLimitStore.set(identifier, timestamps);
 };
 
-// Infrastructure DoS protection (all requests)
 const checkInfraLimit = (ip) => {
   const now = Date.now();
-  const windowStart = now - (60 * 60 * 1000);
+  const windowStart = now - (60 * 60 * 1000); // 1 hour window
   
   const requests = (requestCountStore.get(ip) || []).filter(t => t > windowStart);
   requestCountStore.set(ip, requests);
@@ -194,7 +194,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Infrastructure DoS protection
+    // Infrastructure DoS protection (100 req/hour per IP)
     const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || 
                      req.headers['x-real-ip'] || 
                      'unknown';
@@ -208,7 +208,7 @@ export default async function handler(req, res) {
       
       return res.status(429).json({
         error: 'Too many requests',
-        message: 'Infrastructure rate limit exceeded. Please try again later.',
+        message: 'Infrastructure rate limit exceeded (100 req/hour). Please try again later.',
         resetTime: infraCheck.resetTime
       });
     }
@@ -290,7 +290,7 @@ export default async function handler(req, res) {
       // Let Circle enforce their own limits (5-10 claims/day, varies)
       circleApiKey = apiKey;
     } 
-    // MODE 2: Default faucet - STRICT LIMITS
+    // MODE 2: Default faucet - NO APP-SIDE RATE LIMITS
     else if (mode === 'default') {
       if (!password) {
         return res.status(400).json({ 
@@ -316,22 +316,11 @@ export default async function handler(req, res) {
         });
       }
 
+      // Time-based key rotation (changes every ~10 seconds)
       const keyIndex = Math.floor(Date.now() / 10000) % apiKeys.length;
       circleApiKey = apiKeys[keyIndex];
 
-      // STRICT rate limits for default mode
-      const ipHash = crypto.createHash('sha256').update(clientIp).digest('hex');
-      const ipLimit = checkRateLimit(`ip:${ipHash}`, 10, 24 * 60 * 60 * 1000);
-      
-      if (!ipLimit.allowed) {
-        auditLog({ ...auditData, event: 'ip_limit_exceeded' });
-        return res.status(429).json({
-          error: 'IP rate limit exceeded',
-          message: 'Too many claims from your IP address. Wait 24 hours or use your own API key.',
-          resetTime: ipLimit.resetTime
-        });
-      }
-
+      // Wallet-based rate limit: 1 claim per network per 24 hours
       const walletHash = crypto.createHash('sha256').update(address + blockchain).digest('hex');
       const walletLimit = checkRateLimit(`wallet:${walletHash}`, 1, 24 * 60 * 60 * 1000);
       
@@ -344,7 +333,6 @@ export default async function handler(req, res) {
         });
       }
       
-      recordRateLimit(`ip:${ipHash}`);
       recordRateLimit(`wallet:${walletHash}`);
     } else {
       return res.status(400).json({ 
