@@ -10,7 +10,7 @@ import crypto from 'crypto';
  * 
  * Default Faucet Mode:
  * - Wallet-based: 1 claim per network per 24h
- * - Round-robin key rotation: Each claim uses next key in sequence
+ * - Round-robin key rotation with automatic fallback
  * - Infrastructure DoS protection (100 req/hour per IP)
  */
 
@@ -36,6 +36,17 @@ const SUPPORTED_CHAINS = {
 
 // Round-robin key rotation state
 let currentKeyIndex = 0;
+
+// Analytics tracking
+const analytics = {
+  totalClaims: 0,
+  successfulClaims: 0,
+  failedClaims: 0,
+  claimsByNetwork: {},
+  claimsByMode: { 'own-key': 0, 'default': 0 },
+  keyUsage: {},
+  lastReset: Date.now()
+};
 
 const getApiKeys = () => {
   if (!CIRCLE_API_KEYS) return [];
@@ -125,6 +136,23 @@ const auditLog = (event) => {
   }));
 };
 
+const updateAnalytics = (mode, blockchain, success, keyIndex = null) => {
+  analytics.totalClaims++;
+  
+  if (success) {
+    analytics.successfulClaims++;
+  } else {
+    analytics.failedClaims++;
+  }
+  
+  analytics.claimsByMode[mode] = (analytics.claimsByMode[mode] || 0) + 1;
+  analytics.claimsByNetwork[blockchain] = (analytics.claimsByNetwork[blockchain] || 0) + 1;
+  
+  if (keyIndex !== null) {
+    analytics.keyUsage[`key_${keyIndex}`] = (analytics.keyUsage[`key_${keyIndex}`] || 0) + 1;
+  }
+};
+
 const makeCircleRequest = (apiKey, payload) => {
   return new Promise((resolve, reject) => {
     const postData = JSON.stringify(payload);
@@ -179,6 +207,56 @@ const makeCircleRequest = (apiKey, payload) => {
   });
 };
 
+// Automatic fallback mechanism
+const makeCircleRequestWithFallback = async (payload, mode) => {
+  const apiKeys = getApiKeys();
+  const maxRetries = apiKeys.length;
+  let lastError = null;
+  
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const keyIndex = currentKeyIndex;
+    const apiKey = getNextApiKey();
+    
+    if (!apiKey) {
+      throw new Error('No API keys available');
+    }
+    
+    try {
+      console.log(`[FALLBACK] Attempt ${attempt + 1}/${maxRetries} with key index ${keyIndex}`);
+      const response = await makeCircleRequest(apiKey, payload);
+      
+      // If successful, return immediately
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        console.log(`[FALLBACK] Success with key index ${keyIndex}`);
+        return { response, keyIndex };
+      }
+      
+      // If rate limited (429) or quota exceeded, try next key
+      if (response.statusCode === 429 || response.data?.code === 5) {
+        console.log(`[FALLBACK] Key ${keyIndex} exhausted (${response.statusCode}), trying next key...`);
+        lastError = response;
+        continue;
+      }
+      
+      // For other errors, return immediately (don't retry)
+      return { response, keyIndex };
+      
+    } catch (error) {
+      console.error(`[FALLBACK] Error with key ${keyIndex}:`, error.message);
+      lastError = { statusCode: 500, data: { error: error.message } };
+      
+      // If it's the last attempt, throw the error
+      if (attempt === maxRetries - 1) {
+        throw error;
+      }
+    }
+  }
+  
+  // All keys failed
+  console.error('[FALLBACK] All API keys exhausted or failed');
+  return { response: lastError || { statusCode: 503, data: { error: 'All API keys exhausted' } }, keyIndex: null };
+};
+
 export default async function handler(req, res) {
   const startTime = Date.now();
   let auditData = { mode: null, success: false };
@@ -186,11 +264,25 @@ export default async function handler(req, res) {
   try {
     // CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     if (req.method === 'OPTIONS') {
       return res.status(200).end();
+    }
+
+    // Analytics endpoint
+    if (req.method === 'GET' && req.url === '/api/claim/stats') {
+      const uptime = Date.now() - analytics.lastReset;
+      return res.status(200).json({
+        ...analytics,
+        uptime: Math.floor(uptime / 1000), // seconds
+        successRate: analytics.totalClaims > 0 
+          ? ((analytics.successfulClaims / analytics.totalClaims) * 100).toFixed(2) + '%'
+          : '0%',
+        availableKeys: getApiKeys().length,
+        currentKeyIndex
+      });
     }
 
     if (req.method !== 'POST') {
@@ -274,6 +366,8 @@ export default async function handler(req, res) {
     };
 
     let circleApiKey = '';
+    let usesFallback = false;
+    let usedKeyIndex = null;
 
     // MODE 1: User's own API key
     if (mode === 'own-key') {
@@ -331,15 +425,6 @@ export default async function handler(req, res) {
         });
       }
 
-      // Round-robin key rotation
-      circleApiKey = getNextApiKey();
-      if (!circleApiKey) {
-        return res.status(503).json({ 
-          error: 'No API keys available',
-          message: 'Default faucet is temporarily unavailable.'
-        });
-      }
-
       // Wallet-based rate limit
       const walletHash = crypto.createHash('sha256').update(address + blockchain).digest('hex');
       const walletLimit = checkRateLimit(`wallet:${walletHash}`, 1, 24 * 60 * 60 * 1000);
@@ -354,6 +439,7 @@ export default async function handler(req, res) {
       }
       
       recordRateLimit(`wallet:${walletHash}`);
+      usesFallback = true;
     } else {
       return res.status(400).json({ 
         error: 'Invalid mode',
@@ -373,8 +459,16 @@ export default async function handler(req, res) {
 
     console.log('[CIRCLE_REQUEST]', { blockchain: payload.blockchain, tokens: { native, usdc, eurc } });
 
-    // Make request to Circle API
-    const circleResponse = await makeCircleRequest(circleApiKey, payload);
+    // Make request to Circle API (with fallback for default mode)
+    let circleResponse;
+    
+    if (usesFallback) {
+      const result = await makeCircleRequestWithFallback(payload, mode);
+      circleResponse = result.response;
+      usedKeyIndex = result.keyIndex;
+    } else {
+      circleResponse = await makeCircleRequest(circleApiKey, payload);
+    }
 
     console.log('[CIRCLE_RESPONSE]', { statusCode: circleResponse.statusCode });
 
@@ -382,7 +476,10 @@ export default async function handler(req, res) {
     if (circleResponse.statusCode >= 200 && circleResponse.statusCode < 300) {
       auditData.success = true;
       auditData.duration = Date.now() - startTime;
-      auditLog({ ...auditData, event: 'claim_success' });
+      auditLog({ ...auditData, event: 'claim_success', keyIndex: usedKeyIndex });
+      
+      // Update analytics
+      updateAnalytics(mode, blockchain, true, usedKeyIndex);
       
       return res.status(200).json({
         success: true,
@@ -392,12 +489,16 @@ export default async function handler(req, res) {
       });
     }
 
+    // Update analytics for failed claim
+    updateAnalytics(mode, blockchain, false, usedKeyIndex);
+
     // Handle Circle API errors
     auditLog({ 
       ...auditData, 
       event: 'circle_api_error',
       statusCode: circleResponse.statusCode,
-      error: circleResponse.data.message
+      error: circleResponse.data.message,
+      keyIndex: usedKeyIndex
     });
     
     return res.status(circleResponse.statusCode).json({
@@ -415,6 +516,11 @@ export default async function handler(req, res) {
       error: error.message,
       stack: error.stack
     });
+    
+    // Update analytics for error
+    if (auditData.mode && auditData.blockchain) {
+      updateAnalytics(auditData.mode, auditData.blockchain, false);
+    }
     
     return res.status(500).json({ 
       error: 'Internal server error',
