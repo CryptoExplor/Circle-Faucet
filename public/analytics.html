@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Circle Faucet - Analytics Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-purple-600 to-indigo-800 p-4">
+    <div class="max-w-6xl mx-auto">
+        <!-- Header -->
+        <div class="bg-white rounded-2xl shadow-2xl p-8 mb-6">
+            <div class="flex items-center justify-between mb-4">
+                <div>
+                    <h1 class="text-3xl font-bold text-gray-800">📊 Analytics Dashboard</h1>
+                    <p class="text-gray-600 mt-2">Real-time faucet statistics and usage metrics</p>
+                </div>
+                <button onclick="refreshData()" class="bg-purple-600 text-white px-6 py-3 rounded-lg hover:bg-purple-700 transition-colors flex items-center gap-2">
+                    <svg id="refreshIcon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                    </svg>
+                    Refresh
+                </button>
+            </div>
+            <div id="lastUpdated" class="text-sm text-gray-500"></div>
+        </div>
+
+        <!-- Loading State -->
+        <div id="loading" class="bg-white rounded-2xl shadow-2xl p-12 text-center">
+            <div class="animate-spin rounded-full h-16 w-16 border-b-4 border-purple-600 mx-auto mb-4"></div>
+            <p class="text-gray-600">Loading analytics...</p>
+        </div>
+
+        <!-- Error State -->
+        <div id="error" class="hidden bg-red-50 border-2 border-red-200 rounded-2xl p-8 text-center">
+            <svg class="mx-auto mb-4 text-red-600" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="15" y1="9" x2="9" y2="15"></line>
+                <line x1="9" y1="9" x2="15" y2="15"></line>
+            </svg>
+            <h3 class="text-xl font-bold text-red-900 mb-2">Failed to Load Analytics</h3>
+            <p id="errorMessage" class="text-red-700"></p>
+        </div>
+
+        <!-- Stats Grid -->
+        <div id="statsContainer" class="hidden">
+            <!-- Overview Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+                <div class="bg-white rounded-xl shadow-lg p-6">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-gray-600 text-sm font-semibold">Total Claims</span>
+                        <span class="text-3xl">📊</span>
+                    </div>
+                    <div id="totalClaims" class="text-3xl font-bold text-purple-600">0</div>
+                    <div id="successRate" class="text-sm text-gray-500 mt-1">0% success rate</div>
+                </div>
+
+                <div class="bg-white rounded-xl shadow-lg p-6">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-gray-600 text-sm font-semibold">Successful Claims</span>
+                        <span class="text-3xl">✅</span>
+                    </div>
+                    <div id="successfulClaims" class="text-3xl font-bold text-green-600">0</div>
+                    <div class="text-sm text-gray-500 mt-1">Claims completed</div>
+                </div>
+
+                <div class="bg-white rounded-xl shadow-lg p-6">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-gray-600 text-sm font-semibold">Failed Claims</span>
+                        <span class="text-3xl">❌</span>
+                    </div>
+                    <div id="failedClaims" class="text-3xl font-bold text-red-600">0</div>
+                    <div class="text-sm text-gray-500 mt-1">Errors occurred</div>
+                </div>
+
+                <div class="bg-white rounded-xl shadow-lg p-6">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-gray-600 text-sm font-semibold">Uptime</span>
+                        <span class="text-3xl">⏱️</span>
+                    </div>
+                    <div id="uptime" class="text-3xl font-bold text-blue-600">0h</div>
+                    <div class="text-sm text-gray-500 mt-1">Since last restart</div>
+                </div>
+            </div>
+
+            <!-- API Keys Status -->
+            <div class="bg-white rounded-2xl shadow-2xl p-8 mb-6">
+                <h2 class="text-2xl font-bold text-gray-800 mb-6">🔑 API Keys Status</h2>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div class="bg-purple-50 border-2 border-purple-200 rounded-lg p-4">
+                        <div class="text-sm text-gray-600 mb-1">Available Keys</div>
+                        <div id="availableKeys" class="text-2xl font-bold text-purple-600">0</div>
+                    </div>
+                    <div class="bg-blue-50 border-2 border-blue-200 rounded-lg p-4">
+                        <div class="text-sm text-gray-600 mb-1">Current Key Index</div>
+                        <div id="currentKeyIndex" class="text-2xl font-bold text-blue-600">0</div>
+                    </div>
+                    <div class="bg-green-50 border-2 border-green-200 rounded-lg p-4">
+                        <div class="text-sm text-gray-600 mb-1">Next Key Index</div>
+                        <div id="nextKeyIndex" class="text-2xl font-bold text-green-600">0</div>
+                    </div>
+                </div>
+                <div id="keyUsageChart" class="mt-6"></div>
+            </div>
+
+            <!-- Mode Distribution -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                <div class="bg-white rounded-2xl shadow-2xl p-8">
+                    <h2 class="text-2xl font-bold text-gray-800 mb-6">🎯 Claims by Mode</h2>
+                    <div id="modeChart" class="space-y-4"></div>
+                </div>
+
+                <div class="bg-white rounded-2xl shadow-2xl p-8">
+                    <h2 class="text-2xl font-bold text-gray-800 mb-6">🌐 Claims by Network</h2>
+                    <div id="networkChart" class="space-y-3 max-h-96 overflow-y-auto"></div>
+                </div>
+            </div>
+
+            <!-- Key Usage Distribution -->
+            <div class="bg-white rounded-2xl shadow-2xl p-8">
+                <h2 class="text-2xl font-bold text-gray-800 mb-6">🔄 Key Usage Distribution</h2>
+                <div id="keyUsageDistribution" class="space-y-3"></div>
+                <div class="mt-6 p-4 bg-blue-50 border-2 border-blue-200 rounded-lg">
+                    <p class="text-sm text-blue-900">
+                        <strong>💡 Tip:</strong> Balanced distribution across keys indicates healthy round-robin rotation. 
+                        If one key has significantly higher usage, the rotation may need adjustment.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let refreshInterval;
+
+        async function fetchAnalytics() {
+            try {
+                const response = await fetch('/api/claim/stats');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                return await response.json();
+            } catch (error) {
+                throw new Error(`Failed to fetch analytics: ${error.message}`);
+            }
+        }
+
+        function formatUptime(seconds) {
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = seconds % 60;
+            
+            if (hours > 0) {
+                return `${hours}h ${minutes}m`;
+            } else if (minutes > 0) {
+                return `${minutes}m ${secs}s`;
+            } else {
+                return `${secs}s`;
+            }
+        }
+
+        function createBarChart(label, value, maxValue, color) {
+            const percentage = maxValue > 0 ? (value / maxValue) * 100 : 0;
+            return `
+                <div class="mb-4">
+                    <div class="flex justify-between mb-2">
+                        <span class="font-semibold text-gray-700">${label}</span>
+                        <span class="font-bold text-${color}-600">${value}</span>
+                    </div>
+                    <div class="w-full bg-gray-200 rounded-full h-3">
+                        <div class="bg-${color}-600 h-3 rounded-full transition-all duration-500" style="width: ${percentage}%"></div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderAnalytics(data) {
+            // Update overview stats
+            document.getElementById('totalClaims').textContent = data.totalClaims;
+            document.getElementById('successfulClaims').textContent = data.successfulClaims;
+            document.getElementById('failedClaims').textContent = data.failedClaims;
+            document.getElementById('successRate').textContent = data.successRate + ' success rate';
+            document.getElementById('uptime').textContent = formatUptime(data.uptime);
+            
+            // Update API keys status
+            document.getElementById('availableKeys').textContent = data.availableKeys;
+            document.getElementById('currentKeyIndex').textContent = data.currentKeyIndex;
+            document.getElementById('nextKeyIndex').textContent = (data.currentKeyIndex + 1) % data.availableKeys;
+            
+            // Mode distribution
+            const modeTotal = (data.claimsByMode['own-key'] || 0) + (data.claimsByMode['default'] || 0);
+            const modeChartHtml = `
+                ${createBarChart('Own API Key', data.claimsByMode['own-key'] || 0, modeTotal, 'purple')}
+                ${createBarChart('Default Faucet', data.claimsByMode['default'] || 0, modeTotal, 'indigo')}
+            `;
+            document.getElementById('modeChart').innerHTML = modeChartHtml;
+            
+            // Network distribution
+            const networks = Object.entries(data.claimsByNetwork || {}).sort((a, b) => b[1] - a[1]);
+            const maxNetwork = networks.length > 0 ? networks[0][1] : 1;
+            const networkChartHtml = networks.map(([network, count]) => 
+                createBarChart(network, count, maxNetwork, 'blue')
+            ).join('');
+            document.getElementById('networkChart').innerHTML = networkChartHtml || '<p class="text-gray-500 text-center py-8">No network data yet</p>';
+            
+            // Key usage distribution
+            const keyUsage = Object.entries(data.keyUsage || {}).sort((a, b) => {
+                const numA = parseInt(a[0].split('_')[1]);
+                const numB = parseInt(b[0].split('_')[1]);
+                return numA - numB;
+            });
+            const maxKeyUsage = keyUsage.length > 0 ? Math.max(...keyUsage.map(k => k[1])) : 1;
+            const keyUsageHtml = keyUsage.map(([key, count]) => 
+                createBarChart(`API Key #${key.split('_')[1]}`, count, maxKeyUsage, 'green')
+            ).join('');
+            document.getElementById('keyUsageDistribution').innerHTML = keyUsageHtml || '<p class="text-gray-500 text-center py-8">No key usage data yet</p>';
+            
+            // Update last updated time
+            document.getElementById('lastUpdated').textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
+            
+            // Show stats, hide loading/error
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('error').classList.add('hidden');
+            document.getElementById('statsContainer').classList.remove('hidden');
+        }
+
+        function showError(message) {
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('statsContainer').classList.add('hidden');
+            document.getElementById('error').classList.remove('hidden');
+            document.getElementById('errorMessage').textContent = message;
+        }
+
+        async function refreshData() {
+            const refreshIcon = document.getElementById('refreshIcon');
+            refreshIcon.classList.add('animate-spin');
+            
+            try {
+                const data = await fetchAnalytics();
+                renderAnalytics(data);
+            } catch (error) {
+                console.error('Error fetching analytics:', error);
+                showError(error.message);
+            } finally {
+                setTimeout(() => {
+                    refreshIcon.classList.remove('animate-spin');
+                }, 500);
+            }
+        }
+
+        // Initial load
+        refreshData();
+
+        // Auto-refresh every 10 seconds
+        refreshInterval = setInterval(refreshData, 10000);
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+        });
+    </script>
+</body>
+</html>
