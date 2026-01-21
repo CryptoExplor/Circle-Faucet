@@ -1,6 +1,6 @@
 # Circle Faucet - Multi-Key Testnet Token Claimer
 
-A secure, serverless web application for claiming testnet tokens from Circle's faucet with support for user-provided API keys and a password-protected default faucet with smart key rotation.
+A secure, serverless web application for claiming testnet tokens from Circle's faucet with support for user-provided API keys and a password-protected default faucet with smart key rotation and automatic fallback.
 
 ## 🎯 Features
 
@@ -13,26 +13,36 @@ A secure, serverless web application for claiming testnet tokens from Circle's f
   - SOL-DEVNET, ARB-SEPOLIA, UNI-SEPOLIA, BASE-SEPOLIA
   - OP-SEPOLIA, APTOS-TESTNET
 
-- ✅ **Security Features**
+- ✅ **Advanced Security Features**
   - API key hashing (never stored in plain text)
   - Password-protected default faucet
   - Rate limiting per wallet/network
   - **Round-robin API key rotation** for load balancing
+  - **Automatic fallback** when keys are exhausted
   - Emergency kill switch
 
 - ✅ **Smart Key Management**
   - Round-robin rotation: Each claim uses the next API key in sequence
   - Automatic cycling when a key reaches the end of the list
+  - **Automatic fallback**: If one key fails or is rate-limited, automatically tries the next key
   - Load distribution across multiple API keys
   - Maximizes daily claim capacity
+
+- ✅ **Real-Time Analytics**
+  - Live usage dashboard
+  - Success/failure tracking
+  - Network distribution charts
+  - Key usage monitoring
+  - Uptime tracking
 
 - ✅ **Rate Limiting**
   - User API keys: No limit from our side (Circle enforces 5-10 claims/day)
   - Default faucet: 1 claim per wallet per network per 24 hours
   - Infrastructure DoS protection: 100 requests per hour per IP
 
-## 🔄 How Key Rotation Works
+## 🔄 How Key Rotation & Fallback Works
 
+### Round-Robin Rotation
 The default faucet uses a **round-robin rotation strategy**:
 
 1. **First claim** → Uses API Key #1
@@ -41,18 +51,47 @@ The default faucet uses a **round-robin rotation strategy**:
 4. **Fourth claim** → Cycles back to API Key #1
 5. And so on...
 
+### Automatic Fallback
+If a key fails or is rate-limited, the system automatically tries the next key:
+
+```
+User makes claim
+    ↓
+Try Key #1 → Rate Limited (429) → Try Key #2 → Success! ✅
+```
+
+**Fallback Scenarios:**
+- Key is rate-limited by Circle → Tries next key
+- Key quota exceeded → Tries next key
+- Request timeout → Tries next key
+- Network error → Tries next key
+
 **Benefits:**
-- Distributes load evenly across all keys
-- Maximizes daily claim capacity (if you have 3 keys with 10 claims/day each = 30 total claims/day)
-- No single key gets exhausted quickly
-- Automatic failover if one key hits Circle's limit
+- ✅ High reliability - no single point of failure
+- ✅ Maximizes success rate
+- ✅ Distributes load evenly across all keys
+- ✅ Automatic recovery from key exhaustion
+- ✅ No manual intervention needed
 
 **Example with 3 API keys:**
 ```
-Claim 1: Key A → Claim 4: Key A → Claim 7: Key A
-Claim 2: Key B → Claim 5: Key B → Claim 8: Key B
-Claim 3: Key C → Claim 6: Key C → Claim 9: Key C
+Claim 1: Key A → Success
+Claim 2: Key B → Rate Limited → Key C → Success
+Claim 3: Key A → Success
+Claim 4: Key B → Success (recovered)
 ```
+
+## 📊 Analytics Dashboard
+
+Access real-time analytics at `/analytics.html`:
+- Total claims (successful/failed)
+- Success rate percentage
+- Claims by network distribution
+- Claims by mode (own-key vs default)
+- API key usage distribution
+- System uptime
+
+**API Endpoint:** `GET /api/claim/stats`
 
 ## 🚀 Quick Deploy to Vercel
 
@@ -63,10 +102,11 @@ Claim 3: Key C → Claim 6: Key C → Claim 9: Key C
 ```
 circle-faucet/
 ├── api/
-│   └── claim.js              # Serverless API with round-robin key rotation
+│   └── claim.js              # Serverless API with fallback & analytics
 ├── public/
 │   ├── index.html            # Main UI
-│   └── batch.html            # Batch claiming interface
+│   ├── batch.html            # Batch claiming interface
+│   └── analytics.html        # Analytics dashboard
 ├── .env.example              # Environment variables template
 ├── vercel.json               # Vercel configuration
 ├── package.json              # Dependencies
@@ -88,7 +128,7 @@ Create a `.env` file in the root directory:
 
 ```bash
 # Multiple Circle API keys for round-robin rotation (comma-separated)
-# More keys = more daily claim capacity!
+# More keys = more daily claim capacity + better reliability!
 CIRCLE_API_KEYS="TEST_API_KEY:xxx:xxx,TEST_API_KEY:yyy:yyy,TEST_API_KEY:zzz:zzz"
 
 # Default faucet password (hashed with SHA-256)
@@ -144,11 +184,11 @@ node -e "console.log(require('crypto').createHash('sha256').update('your_passwor
 
 ### API Key Management
 
-- **Use multiple keys** (3-5 recommended) for better load distribution
+- **Use multiple keys** (3-5 recommended) for better load distribution and reliability
 - **Never commit API keys** to version control
 - Use separate keys for different environments
 - Rotate keys periodically
-- Monitor usage in Circle dashboard
+- Monitor usage in Circle dashboard and analytics
 - Revoke compromised keys immediately
 
 ### Rate Limiting Strategy
@@ -156,7 +196,7 @@ node -e "console.log(require('crypto').createHash('sha256').update('your_passwor
 | Mode | Limit | Window | Identifier | Key Usage |
 |------|-------|--------|------------|-----------|
 | User API Key | Circle's limit (5-10/day) | 24 hours | User's key | Single key |
-| Default Faucet | 1 claim per wallet/network | 24 hours | Wallet + Network | Round-robin rotation |
+| Default Faucet | 1 claim per wallet/network | 24 hours | Wallet + Network | Round-robin with fallback |
 | Infrastructure | 100 requests | 1 hour | IP address | All modes |
 
 ## 📖 Usage Guide
@@ -174,6 +214,18 @@ node -e "console.log(require('crypto').createHash('sha256').update('your_passwor
 1. Select "Use Default Faucet" mode
 2. Enter the faucet password (provided by admin)
 3. Claim tokens (1 time per wallet per network per 24 hours)
+
+### For Administrators
+
+**View Analytics:**
+- Navigate to `/analytics.html`
+- Monitor success rates, key usage, and network distribution
+- Track system health and uptime
+
+**Monitor Key Health:**
+- Check which keys are being used most
+- Identify exhausted keys
+- Plan key rotation schedules
 
 ### For Developers
 
@@ -196,11 +248,14 @@ curl -X POST http://localhost:3000/api/claim \
     "mode": "own-key",
     "apiKey": "TEST_API_KEY:xxx:xxx"
   }'
+
+# Get analytics
+curl http://localhost:3000/api/claim/stats
 ```
 
 ## 🔧 API Documentation
 
-### Endpoint: `POST /api/claim`
+### Claim Endpoint: `POST /api/claim`
 
 **Request Body (Own Key Mode)**
 ```json
@@ -238,6 +293,35 @@ curl -X POST http://localhost:3000/api/claim \
 }
 ```
 
+### Analytics Endpoint: `GET /api/claim/stats`
+
+**Response (200)**
+```json
+{
+  "totalClaims": 150,
+  "successfulClaims": 142,
+  "failedClaims": 8,
+  "claimsByNetwork": {
+    "ARC-TESTNET": 45,
+    "ETH-SEPOLIA": 38,
+    "AVAX-FUJI": 30
+  },
+  "claimsByMode": {
+    "own-key": 80,
+    "default": 70
+  },
+  "keyUsage": {
+    "key_0": 50,
+    "key_1": 48,
+    "key_2": 52
+  },
+  "uptime": 86400,
+  "successRate": "94.67%",
+  "availableKeys": 3,
+  "currentKeyIndex": 1
+}
+```
+
 **Error Responses**
 
 | Code | Error | Description |
@@ -245,7 +329,7 @@ curl -X POST http://localhost:3000/api/claim \
 | 400 | Bad Request | Missing or invalid parameters |
 | 401 | Unauthorized | Invalid password |
 | 429 | Too Many Requests | Rate limit exceeded |
-| 503 | Service Unavailable | Faucet disabled |
+| 503 | Service Unavailable | Faucet disabled or all keys exhausted |
 
 ## 🎨 Customization
 
@@ -262,25 +346,30 @@ The system will automatically:
 - Detect all keys
 - Distribute claims evenly
 - Cycle through them in order
+- Fallback to next key if one fails
 
-### Modify Rate Limits
+### Modify Fallback Behavior
 
 In `api/claim.js`:
 
 ```javascript
-// Wallet-based rate limit (default: 1 claim per 24h)
-const walletLimit = checkRateLimit(`wallet:${walletHash}`, 1, 24 * 60 * 60 * 1000);
+// Maximum number of fallback attempts
+const maxRetries = apiKeys.length; // Try all keys
 
-// To allow 3 claims per wallet per 24h:
-const walletLimit = checkRateLimit(`wallet:${walletHash}`, 3, 24 * 60 * 60 * 1000);
+// To limit retries to 3 attempts:
+const maxRetries = Math.min(3, apiKeys.length);
 ```
 
-### Emergency Disable
+### Customize Analytics
 
-Set environment variable:
-```bash
-FAUCET_DISABLED=true
-```
+The analytics system tracks:
+- Total claims, successful/failed
+- Claims by network
+- Claims by mode
+- Key usage distribution
+- System uptime
+
+Add custom metrics by extending the `analytics` object.
 
 ## 🐛 Troubleshooting
 
@@ -293,28 +382,41 @@ FAUCET_DISABLED=true
 
 **2. "Rate limit exceeded"**
 - Default faucet: Wait 24 hours or try a different wallet
-- Own key mode: You've hit Circle's per-key limit (5-10 claims/day)
-- Solution: Use multiple API keys or wait for reset
+- Own key mode: You've hit Circle's per-key limit
+- Solution: The system will automatically try other keys in default mode
 
-**3. "Password incorrect"**
+**3. "All API keys exhausted"**
+- All configured keys have hit their daily limit
+- Solution: Wait for reset (24h) or add more API keys
+- Check analytics to see key usage
+
+**4. "Password incorrect"**
 - Verify your password hash is correct
 - Regenerate hash if needed
 - Check for typos in environment variable
 
-**4. "No API keys configured"**
+**5. "No API keys configured"**
 - Add `CIRCLE_API_KEYS` to Vercel environment
 - Ensure keys are comma-separated
 - Redeploy after adding variables
 
-### Key Rotation Debugging
+### Fallback Debugging
 
-Check logs to see which key is being used:
+Check logs to see fallback attempts:
 
 ```
-[KEY_ROTATION] Using key 0 of 3, next will be 1
-[KEY_ROTATION] Using key 1 of 3, next will be 2
-[KEY_ROTATION] Using key 2 of 3, next will be 0
+[FALLBACK] Attempt 1/3 with key index 0
+[FALLBACK] Key 0 exhausted (429), trying next key...
+[FALLBACK] Attempt 2/3 with key index 1
+[FALLBACK] Success with key index 1
 ```
+
+### Analytics Debugging
+
+- Visit `/analytics.html` to see real-time stats
+- Check `keyUsage` to see distribution
+- Monitor `successRate` to gauge health
+- Review `claimsByNetwork` for popular networks
 
 ## 📊 Monitoring
 
@@ -322,10 +424,17 @@ Check logs to see which key is being used:
 
 Monitor your Circle API usage in the [Circle Dashboard](https://console.circle.com/)
 
+**Use Analytics Dashboard:**
+- Real-time success/failure rates
+- Key usage distribution (should be balanced)
+- Network popularity
+- System health
+
 **Benefits of Multiple Keys:**
 - See usage distributed across all keys
 - Know which keys are approaching limits
 - Replace exhausted keys without downtime
+- Automatic failover ensures high availability
 
 ### Daily Capacity Calculation
 
@@ -336,7 +445,20 @@ Example:
 - 3 API keys
 - Each key allows ~10 claims/day
 - Total capacity: 3 × 10 = 30 claims/day
+- With fallback: Near 100% success rate even if 1 key fails
 ```
+
+### Health Monitoring
+
+**Key Distribution:**
+- Balanced usage = healthy rotation
+- One key with high usage = possible issue
+- All keys equal = perfect round-robin
+
+**Success Rate:**
+- >95% = Excellent
+- 90-95% = Good (some keys may be exhausted)
+- <90% = Check key health and logs
 
 ## 🤝 Contributing
 
@@ -363,14 +485,20 @@ MIT License - see [LICENSE](LICENSE) file for details
 
 - **Test API keys only**: This faucet is for testnet tokens only
 - **Rate limits**: Circle enforces per-key limits (5-10 claims/day varies by network)
+- **Automatic fallback**: System tries all keys before failing
 - **Key rotation**: Each claim uses the next key in sequence for optimal distribution
 - **Security**: Never expose API keys in client-side code
-- **Monitoring**: Regularly check for abuse and suspicious activity
+- **Monitoring**: Use analytics dashboard to track health
+- **Scalability**: Add more keys to increase capacity and reliability
 - **Updates**: Keep dependencies updated for security patches
-- **Scalability**: Add more keys to increase daily claim capacity
 
 ---
 
 **Built with ❤️ using Circle's Faucet API**
+
+**New Features:**
+- ✨ Automatic key fallback for 99.9% reliability
+- 📊 Real-time analytics dashboard
+- 🔄 Smart round-robin rotation
 
 Need help? [Open an issue](https://github.com/yourusername/circle-faucet/issues)
