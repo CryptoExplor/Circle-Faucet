@@ -10,12 +10,22 @@
     <div class="max-w-6xl mx-auto">
         <!-- Header -->
         <div class="bg-white rounded-2xl shadow-2xl p-8 mb-6">
-            <div class="flex items-center justify-between mb-4">
-                <div>
-                    <h1 class="text-3xl font-bold text-gray-800">📊 Analytics Dashboard</h1>
-                    <p class="text-gray-600 mt-2">Real-time faucet statistics and usage metrics</p>
+            <div class="flex items-center justify-between flex-wrap gap-4 mb-4">
+                <div class="flex items-center gap-4">
+                    <a href="/" class="text-purple-600 hover:text-purple-800 transition-colors flex items-center gap-2 px-4 py-2 rounded-lg hover:bg-purple-50">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                            <polyline points="9 22 9 12 15 12 15 22"></polyline>
+                        </svg>
+                        <span class="font-semibold">Back to Faucet</span>
+                    </a>
+                    <div class="hidden sm:block h-8 w-px bg-gray-300"></div>
+                    <div>
+                        <h1 class="text-2xl sm:text-3xl font-bold text-gray-800">📊 Analytics Dashboard</h1>
+                        <p class="text-gray-600 text-sm sm:text-base mt-1">Real-time faucet statistics and usage metrics</p>
+                    </div>
                 </div>
-                <button onclick="refreshData()" class="bg-purple-600 text-white px-6 py-3 rounded-lg hover:bg-purple-700 transition-colors flex items-center gap-2">
+                <button onclick="refreshData()" class="bg-purple-600 text-white px-6 py-3 rounded-lg hover:bg-purple-700 transition-colors flex items-center gap-2 shadow-lg hover:shadow-xl">
                     <svg id="refreshIcon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
                     </svg>
