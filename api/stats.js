@@ -1,10 +1,10 @@
-import { getAnalytics } from './lib/analytics.js';
+import { getAnalytics } from './lib/analytics-kv.js';
 
 /**
  * Analytics Statistics Endpoint
  * GET /api/stats
  * 
- * Returns real-time faucet usage statistics
+ * Returns real-time faucet usage statistics from Vercel KV
  */
 
 export default async function handler(req, res) {
@@ -22,23 +22,33 @@ export default async function handler(req, res) {
   }
 
   try {
-    const analytics = getAnalytics();
+    // Get analytics from KV
+    const analytics = await getAnalytics();
 
     // Get API keys count from environment
     const CIRCLE_API_KEYS = process.env.CIRCLE_API_KEYS || '';
     const apiKeys = CIRCLE_API_KEYS.split(',').map(k => k.trim()).filter(k => k.length > 0);
 
+    console.log('[STATS] Returning analytics:', {
+      totalClaims: analytics.totalClaims,
+      successfulClaims: analytics.successfulClaims,
+      failedClaims: analytics.failedClaims,
+      successRate: analytics.successRate
+    });
+
     return res.status(200).json({
       ...analytics,
       availableKeys: apiKeys.length,
       timestamp: new Date().toISOString(),
-      note: 'Analytics data persists during warm function lifecycle but resets on cold starts. For persistent analytics, integrate a database like Vercel KV.'
+      storageType: 'vercel-kv',
+      note: 'Analytics data is now persisted in Vercel KV and survives cold starts and serverless restarts.'
     });
   } catch (error) {
     console.error('[STATS_ERROR]', error);
     return res.status(500).json({ 
       error: 'Failed to fetch analytics',
-      message: error.message 
+      message: error.message,
+      details: 'Ensure Vercel KV is properly configured in your project settings.'
     });
   }
 }
