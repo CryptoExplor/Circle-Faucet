@@ -135,7 +135,7 @@
 
         async function fetchAnalytics() {
             try {
-                const response = await fetch('/api/claim/stats');
+                const response = await fetch('/api/stats');
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
