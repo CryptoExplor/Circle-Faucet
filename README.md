@@ -83,7 +83,7 @@ Claim 4: Key B → Success (recovered)
 
 ## 📊 Analytics Dashboard
 
-Access real-time analytics at `/analytics.html`:
+Access real-time [analytics](https://circle-api-faucet.vercel.app/analytics.html) at `/analytics.html`:
 - Total claims (successful/failed)
 - Success rate percentage
 - Claims by network distribution
@@ -91,7 +91,9 @@ Access real-time analytics at `/analytics.html`:
 - API key usage distribution
 - System uptime
 
-**API Endpoint:** `GET /api/claim/stats`
+**API Endpoint:** `GET /api/stats`
+
+**Note:** Analytics data persists during warm function lifecycle but resets on serverless cold starts. For production-grade persistent analytics, integrate a database like Vercel KV or Upstash Redis.
 
 ## 🚀 Quick Deploy to Vercel
 
@@ -250,7 +252,7 @@ curl -X POST http://localhost:3000/api/claim \
   }'
 
 # Get analytics
-curl http://localhost:3000/api/claim/stats
+curl http://localhost:3000/api/stats
 ```
 
 ## 🔧 API Documentation
@@ -293,7 +295,7 @@ curl http://localhost:3000/api/claim/stats
 }
 ```
 
-### Analytics Endpoint: `GET /api/claim/stats`
+### Analytics Endpoint: `GET /api/stats`
 
 **Response (200)**
 ```json
@@ -318,7 +320,8 @@ curl http://localhost:3000/api/claim/stats
   "uptime": 86400,
   "successRate": "94.67%",
   "availableKeys": 3,
-  "currentKeyIndex": 1
+  "currentKeyIndex": 1,
+  "timestamp": "2025-01-22T10:30:00.000Z"
 }
 ```
 
