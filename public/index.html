@@ -12,10 +12,21 @@
 </head>
 <body class="min-h-screen bg-gradient-to-br from-purple-600 to-indigo-800 p-4 flex items-center justify-center">
   <div class="bg-white rounded-2xl shadow-2xl p-8 max-w-2xl w-full">
-    <!-- Header with Logo -->
-    <div class="flex items-center justify-center mb-4">
+    <!-- Header with Logo and Analytics Link -->
+    <div class="flex items-center justify-between mb-4">
       <img src="/primary-logo.svg" alt="Circle Logo" class="w-48 h-24">
+      <a 
+        href="/analytics.html" 
+        class="flex items-center gap-2 bg-purple-100 text-purple-700 px-4 py-2 rounded-lg hover:bg-purple-200 transition-colors font-semibold"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 21H4.6c-.56 0-.84 0-1.054-.109a1 1 0 0 1-.437-.437C3 20.24 3 19.96 3 19.4V3"></path>
+          <path d="M7 14v4M12 10v8M17 6v12"></path>
+        </svg>
+        Analytics
+      </a>
     </div>
+    
     <h1 class="text-3xl font-bold text-center text-gray-800 mb-2">
       Circle Faucet
     </h1>
