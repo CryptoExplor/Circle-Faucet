@@ -1,5 +1,6 @@
 import https from 'https';
 import crypto from 'crypto';
+import { updateAnalytics, setCurrentKeyIndex } from './lib/analytics.js';
 
 /**
  * RATE LIMITING STRATEGY
@@ -34,19 +35,10 @@ const SUPPORTED_CHAINS = {
   'APTOS-TESTNET': 'APTOS-TESTNET'
 };
 
-// Round-robin key rotation state
-let currentKeyIndex = 0;
-
-// Analytics tracking
-const analytics = {
-  totalClaims: 0,
-  successfulClaims: 0,
-  failedClaims: 0,
-  claimsByNetwork: {},
-  claimsByMode: { 'own-key': 0, 'default': 0 },
-  keyUsage: {},
-  lastReset: Date.now()
-};
+// Round-robin key rotation state (persists across warm starts)
+if (!global.currentKeyIndex) {
+  global.currentKeyIndex = 0;
+}
 
 const getApiKeys = () => {
   if (!CIRCLE_API_KEYS) return [];
@@ -58,12 +50,15 @@ const getNextApiKey = () => {
   if (apiKeys.length === 0) return null;
   
   // Get current key
-  const key = apiKeys[currentKeyIndex];
+  const key = apiKeys[global.currentKeyIndex];
   
   // Move to next key for next request
-  currentKeyIndex = (currentKeyIndex + 1) % apiKeys.length;
+  global.currentKeyIndex = (global.currentKeyIndex + 1) % apiKeys.length;
   
-  console.log(`[KEY_ROTATION] Using key ${currentKeyIndex} of ${apiKeys.length}, next will be ${(currentKeyIndex + 1) % apiKeys.length}`);
+  // Update analytics
+  setCurrentKeyIndex(global.currentKeyIndex);
+  
+  console.log(`[KEY_ROTATION] Using key ${global.currentKeyIndex} of ${apiKeys.length}, next will be ${(global.currentKeyIndex + 1) % apiKeys.length}`);
   
   return key;
 };
@@ -136,23 +131,6 @@ const auditLog = (event) => {
   }));
 };
 
-const updateAnalytics = (mode, blockchain, success, keyIndex = null) => {
-  analytics.totalClaims++;
-  
-  if (success) {
-    analytics.successfulClaims++;
-  } else {
-    analytics.failedClaims++;
-  }
-  
-  analytics.claimsByMode[mode] = (analytics.claimsByMode[mode] || 0) + 1;
-  analytics.claimsByNetwork[blockchain] = (analytics.claimsByNetwork[blockchain] || 0) + 1;
-  
-  if (keyIndex !== null) {
-    analytics.keyUsage[`key_${keyIndex}`] = (analytics.keyUsage[`key_${keyIndex}`] || 0) + 1;
-  }
-};
-
 const makeCircleRequest = (apiKey, payload) => {
   return new Promise((resolve, reject) => {
     const postData = JSON.stringify(payload);
@@ -214,7 +192,7 @@ const makeCircleRequestWithFallback = async (payload, mode) => {
   let lastError = null;
   
   for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const keyIndex = currentKeyIndex;
+    const keyIndex = global.currentKeyIndex;
     const apiKey = getNextApiKey();
     
     if (!apiKey) {
