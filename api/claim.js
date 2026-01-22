@@ -264,25 +264,11 @@ export default async function handler(req, res) {
   try {
     // CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     if (req.method === 'OPTIONS') {
       return res.status(200).end();
-    }
-
-    // Analytics endpoint
-    if (req.method === 'GET' && req.url === '/api/claim/stats') {
-      const uptime = Date.now() - analytics.lastReset;
-      return res.status(200).json({
-        ...analytics,
-        uptime: Math.floor(uptime / 1000), // seconds
-        successRate: analytics.totalClaims > 0 
-          ? ((analytics.successfulClaims / analytics.totalClaims) * 100).toFixed(2) + '%'
-          : '0%',
-        availableKeys: getApiKeys().length,
-        currentKeyIndex
-      });
     }
 
     if (req.method !== 'POST') {
