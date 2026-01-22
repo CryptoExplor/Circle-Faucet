@@ -1,8 +1,8 @@
 {
   "name": "circle-faucet",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "type": "module",
-  "description": "Circle Testnet Faucet - Production Ready",
+  "description": "Circle Testnet Faucet - Production Ready with Persistent Analytics",
   "scripts": {
     "dev": "vercel dev",
     "build": "echo 'No build step required - using ESM React'",
@@ -12,12 +12,17 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "dependencies": {
+    "@vercel/kv": "^1.0.1"
+  },
   "keywords": [
     "circle",
     "faucet",
     "testnet",
     "crypto",
-    "blockchain"
+    "blockchain",
+    "vercel-kv",
+    "analytics"
   ],
   "author": "CryptoExplor",
   "license": "MIT"
