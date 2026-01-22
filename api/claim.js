@@ -1,6 +1,6 @@
 import https from 'https';
 import crypto from 'crypto';
-import { updateAnalytics, setCurrentKeyIndex } from './lib/analytics.js';
+import { updateAnalytics, setCurrentKeyIndex, getCurrentKeyIndex } from './lib/analytics-kv.js';
 
 /**
  * RATE LIMITING STRATEGY
@@ -35,32 +35,30 @@ const SUPPORTED_CHAINS = {
   'APTOS-TESTNET': 'APTOS-TESTNET'
 };
 
-// Round-robin key rotation state (persists across warm starts)
-if (!global.currentKeyIndex) {
-  global.currentKeyIndex = 0;
-}
-
 const getApiKeys = () => {
   if (!CIRCLE_API_KEYS) return [];
   return CIRCLE_API_KEYS.split(',').map(k => k.trim()).filter(k => k.length > 0);
 };
 
-const getNextApiKey = () => {
+const getNextApiKey = async () => {
   const apiKeys = getApiKeys();
   if (apiKeys.length === 0) return null;
   
+  // Get current index from KV
+  const currentIndex = await getCurrentKeyIndex();
+  
   // Get current key
-  const key = apiKeys[global.currentKeyIndex];
+  const key = apiKeys[currentIndex];
   
-  // Move to next key for next request
-  global.currentKeyIndex = (global.currentKeyIndex + 1) % apiKeys.length;
+  // Calculate next index
+  const nextIndex = (currentIndex + 1) % apiKeys.length;
   
-  // Update analytics
-  setCurrentKeyIndex(global.currentKeyIndex);
+  // Update index in KV
+  await setCurrentKeyIndex(nextIndex);
   
-  console.log(`[KEY_ROTATION] Using key ${global.currentKeyIndex} of ${apiKeys.length}, next will be ${(global.currentKeyIndex + 1) % apiKeys.length}`);
+  console.log(`[KEY_ROTATION] Using key ${currentIndex} of ${apiKeys.length}, next will be ${nextIndex}`);
   
-  return key;
+  return { key, index: currentIndex };
 };
 
 const hashPassword = (password) => {
@@ -186,18 +184,19 @@ const makeCircleRequest = (apiKey, payload) => {
 };
 
 // Automatic fallback mechanism
-const makeCircleRequestWithFallback = async (payload, mode) => {
+const makeCircleRequestWithFallback = async (payload) => {
   const apiKeys = getApiKeys();
   const maxRetries = apiKeys.length;
   let lastError = null;
   
   for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const keyIndex = global.currentKeyIndex;
-    const apiKey = getNextApiKey();
+    const result = await getNextApiKey();
     
-    if (!apiKey) {
+    if (!result || !result.key) {
       throw new Error('No API keys available');
     }
+    
+    const { key: apiKey, index: keyIndex } = result;
     
     try {
       console.log(`[FALLBACK] Attempt ${attempt + 1}/${maxRetries} with key index ${keyIndex}`);
@@ -427,7 +426,7 @@ export default async function handler(req, res) {
     let circleResponse;
     
     if (usesFallback) {
-      const result = await makeCircleRequestWithFallback(payload, mode);
+      const result = await makeCircleRequestWithFallback(payload);
       circleResponse = result.response;
       usedKeyIndex = result.keyIndex;
     } else {
@@ -442,8 +441,8 @@ export default async function handler(req, res) {
       auditData.duration = Date.now() - startTime;
       auditLog({ ...auditData, event: 'claim_success', keyIndex: usedKeyIndex });
       
-      // Update analytics
-      updateAnalytics(mode, blockchain, true, usedKeyIndex);
+      // Update analytics in KV
+      await updateAnalytics(mode, blockchain, true, usedKeyIndex);
       
       return res.status(200).json({
         success: true,
@@ -454,7 +453,7 @@ export default async function handler(req, res) {
     }
 
     // Update analytics for failed claim
-    updateAnalytics(mode, blockchain, false, usedKeyIndex);
+    await updateAnalytics(mode, blockchain, false, usedKeyIndex);
 
     // Handle Circle API errors
     auditLog({ 
@@ -483,7 +482,7 @@ export default async function handler(req, res) {
     
     // Update analytics for error
     if (auditData.mode && auditData.blockchain) {
-      updateAnalytics(auditData.mode, auditData.blockchain, false);
+      await updateAnalytics(auditData.mode, auditData.blockchain, false);
     }
     
     return res.status(500).json({ 
