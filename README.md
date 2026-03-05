@@ -1,5 +1,7 @@
 # Circle Faucet - Multi-Key Testnet Token Claimer
 
+> ### 🤖 Looking for the **Pro Bot**? Claim 150K+ wallets across 32 chains with stealth bypass and proxy rotation → [**PRO.md**](./PRO.md)
+
 A secure, serverless web application for claiming testnet tokens from Circle's faucet with support for user-provided API keys and a password-protected default faucet with smart key rotation, automatic fallback, and **persistent analytics powered by Vercel KV**.
 
 ## 🎯 Features
@@ -641,4 +643,16 @@ MIT License - see [LICENSE](LICENSE) file for details
 - 🔄 Smart round-robin rotation
 - 🚀 Production-ready infrastructure
 
-Need help? [Open an issue](https://github.com/yourusername/circle-faucet/issues)
+Need help? [Open an issue](https://github.com/CryptoExplor/Circle-Faucet/issues) or DM [@dare_3 on Telegram](https://t.me/dare_3)
+
+---
+
+### 🤖 Want the Pro Bot?
+
+Need to claim tokens for **thousands of wallets** across **32+ chains** without rate limits? Check out the [**Circle Faucet Pro Bot v9.0**](./PRO.md) — stealth bypass, proxy rotation, multi-chain batching, and more.
+
+**Contact:** [@dare_3 on Telegram](https://t.me/dare_3)
+
+---
+
+`circle faucet` · `circle testnet` · `circle faucet bot` · `circle faucet claimer` · `circle usdc faucet` · `testnet token claimer` · `circle faucet automation` · `circle auto claim` · `circle testnet faucet tool` · `base sepolia faucet` · `ethereum sepolia faucet` · `solana devnet faucet` · `circle faucet bypass` · `circle faucet script`
