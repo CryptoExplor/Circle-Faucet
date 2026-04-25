@@ -1,594 +1,346 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Circle Faucet Claimer - Batch Mode</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            min-height: 100vh;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 20px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        
-        .container {
-            background: white;
-            padding: 40px;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            max-width: 800px;
-            width: 100%;
-            animation: slideIn 0.5s ease-out;
-        }
-        
-        @keyframes slideIn {
-            from {
-                opacity: 0;
-                transform: translateY(-20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-        
-        h1 {
-            text-align: center;
-            color: #333;
-            margin-bottom: 10px;
-            font-size: 28px;
-        }
-        
-        .subtitle {
-            text-align: center;
-            color: #666;
-            margin-bottom: 30px;
-            font-size: 14px;
-        }
-        
-        .form-group {
-            margin-bottom: 25px;
-        }
-        
-        label {
-            display: block;
-            margin-bottom: 8px;
-            font-weight: 600;
-            color: #333;
-            font-size: 14px;
-        }
-        
-        textarea {
-            width: 100%;
-            padding: 12px 15px;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            font-size: 14px;
-            transition: all 0.3s ease;
-            font-family: 'Courier New', monospace;
-            resize: vertical;
-            min-height: 150px;
-        }
-        
-        textarea:focus {
-            outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
-        
-        select {
-            width: 100%;
-            padding: 12px 15px;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            background-color: white;
-            font-size: 14px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-        }
-        
-        select:focus {
-            outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
-        
-        .checkbox-group {
-            display: flex;
-            gap: 15px;
-            flex-wrap: wrap;
-        }
-        
-        .checkbox-item {
-            display: flex;
-            align-items: center;
-            padding: 10px 15px;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-        }
-        
-        .checkbox-item:hover {
-            border-color: #667eea;
-            background-color: #f8f9ff;
-        }
-        
-        .checkbox-item input[type="checkbox"] {
-            margin-right: 8px;
-            cursor: pointer;
-            width: 18px;
-            height: 18px;
-        }
-        
-        .checkbox-item label {
-            margin: 0;
-            cursor: pointer;
-            font-weight: 500;
-        }
-        
-        button {
-            width: 100%;
-            padding: 15px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            margin-top: 10px;
-        }
-        
-        button:hover:not(:disabled) {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-        }
-        
-        button:active:not(:disabled) {
-            transform: translateY(0);
-        }
-        
-        button:disabled {
-            background: #cccccc;
-            cursor: not-allowed;
-            transform: none;
-        }
-        
-        .progress {
-            margin-top: 20px;
-            padding: 15px;
-            background-color: #f8f9fa;
-            border-radius: 8px;
-            display: none;
-        }
-        
-        .progress.active {
-            display: block;
-        }
-        
-        .progress-bar {
-            width: 100%;
-            height: 30px;
-            background-color: #e9ecef;
-            border-radius: 15px;
-            overflow: hidden;
-            margin-bottom: 10px;
-        }
-        
-        .progress-fill {
-            height: 100%;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            transition: width 0.3s ease;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-weight: 600;
-            font-size: 12px;
-        }
-        
-        .progress-text {
-            text-align: center;
-            color: #666;
-            font-size: 14px;
-        }
-        
-        .address-list {
-            margin-top: 20px;
-            max-height: 400px;
-            overflow-y: auto;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            display: none;
-        }
-        
-        .address-list.active {
-            display: block;
-        }
-        
-        .address-item {
-            padding: 12px 15px;
-            border-bottom: 1px solid #e0e0e0;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            transition: background-color 0.2s;
-        }
-        
-        .address-item:last-child {
-            border-bottom: none;
-        }
-        
-        .address-item.pending {
-            background-color: #fff;
-        }
-        
-        .address-item.processing {
-            background-color: #fff3cd;
-        }
-        
-        .address-item.success {
-            background-color: #d4edda;
-        }
-        
-        .address-item.error {
-            background-color: #f8d7da;
-        }
-        
-        .status-icon {
-            width: 24px;
-            height: 24px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 18px;
-        }
-        
-        .address-text {
-            flex: 1;
-            font-family: 'Courier New', monospace;
-            font-size: 13px;
-            word-break: break-all;
-        }
-        
-        .status-text {
-            font-size: 12px;
-            color: #666;
-        }
-        
-        .loading-spinner {
-            display: inline-block;
-            width: 18px;
-            height: 18px;
-            border: 3px solid rgba(102, 126, 234, 0.3);
-            border-radius: 50%;
-            border-top-color: #667eea;
-            animation: spin 1s ease-in-out infinite;
-        }
-        
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-        
-        .info-box {
-            background-color: #e7f3ff;
-            border: 2px solid #2196F3;
-            color: #0d47a1;
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            font-size: 13px;
-        }
-        
-        .info-box strong {
-            display: block;
-            margin-bottom: 8px;
-            font-size: 14px;
-        }
-        
-        .info-box ul {
-            margin-left: 20px;
-            margin-top: 8px;
-        }
-        
-        .info-box li {
-            margin-bottom: 5px;
-        }
-        
-        .stats {
-            display: flex;
-            gap: 15px;
-            margin-top: 15px;
-            flex-wrap: wrap;
-        }
-        
-        .stat-item {
-            flex: 1;
-            min-width: 120px;
-            padding: 10px;
-            background-color: #f8f9fa;
-            border-radius: 8px;
-            text-align: center;
-        }
-        
-        .stat-number {
-            font-size: 24px;
-            font-weight: bold;
-            color: #667eea;
-        }
-        
-        .stat-label {
-            font-size: 12px;
-            color: #666;
-            margin-top: 5px;
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Circle Faucet — Batch Mode</title>
+  <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body>
-    <div class="container">
-        <h1>🚰 Circle Faucet Claimer - Batch Mode</h1>
-        <p class="subtitle">Claim testnet tokens for multiple addresses automatically</p>
-        
-        <div class="info-box">
-            <strong>ℹ️ Batch Claiming Instructions:</strong>
-            <ul>
-                <li>Enter one wallet address per line</li>
-                <li>The app will claim tokens for each address automatically</li>
-                <li>Rate limit: 1 claim per 24 hours per address/network</li>
-                <li>Failed claims will be marked in red</li>
-            </ul>
-        </div>
-        
-        <div class="form-group">
-            <label for="addresses">Wallet Addresses (one per line) *</label>
-            <textarea id="addresses" placeholder="0x123...&#10;0x456...&#10;0x789..."></textarea>
-        </div>
-        
-        <div class="form-group">
-            <label for="blockchain">Blockchain Network *</label>
-            <select id="blockchain">
-                <option value="ARC-TESTNET">ARC-TESTNET</option>
-                <option value="ETH-SEPOLIA">ETH-SEPOLIA</option>
-                <option value="AVAX-FUJI">AVAX-FUJI</option>
-                <option value="MATIC-AMOY">MATIC-AMOY</option>
-                <option value="SOL-DEVNET">SOL-DEVNET</option>
-                <option value="ARB-SEPOLIA">ARB-SEPOLIA</option>
-                <option value="UNI-SEPOLIA">UNI-SEPOLIA</option>
-                <option value="BASE-SEPOLIA">BASE-SEPOLIA</option>
-                <option value="OP-SEPOLIA">OP-SEPOLIA</option>
-                <option value="APTOS-TESTNET">APTOS-TESTNET</option>
-            </select>
-        </div>
-        
-        <div class="form-group">
-            <label>Tokens to Claim *</label>
-            <div class="checkbox-group">
-                <div class="checkbox-item">
-                    <input type="checkbox" id="native">
-                    <label for="native">Native Token</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" id="usdc" checked>
-                    <label for="usdc">USDC</label>
-                </div>
-                <div class="checkbox-item">
-                    <input type="checkbox" id="eurc">
-                    <label for="eurc">EURC</label>
-                </div>
-            </div>
-        </div>
-        
-        <button type="button" id="submitBtn" onclick="startBatchClaim()">
-            Start Batch Claim
-        </button>
-        
-        <div id="progress" class="progress">
-            <div class="progress-bar">
-                <div id="progressFill" class="progress-fill">0%</div>
-            </div>
-            <div id="progressText" class="progress-text">Processing...</div>
-            
-            <div class="stats">
-                <div class="stat-item">
-                    <div class="stat-number" id="totalCount">0</div>
-                    <div class="stat-label">Total</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-number" id="successCount">0</div>
-                    <div class="stat-label">Success</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-number" id="errorCount">0</div>
-                    <div class="stat-label">Failed</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-number" id="pendingCount">0</div>
-                    <div class="stat-label">Pending</div>
-                </div>
-            </div>
-        </div>
-        
-        <div id="addressList" class="address-list"></div>
+<body class="min-h-screen bg-gradient-to-br from-purple-600 to-indigo-800 p-4">
+  <div class="max-w-3xl mx-auto">
+
+    <!-- Header -->
+    <div class="bg-white rounded-2xl shadow-2xl p-8 mb-6">
+      <div class="flex items-center gap-4 mb-1">
+        <a href="/" class="text-purple-600 hover:text-purple-800 flex items-center gap-1 text-sm font-semibold">
+          ← Back to Faucet
+        </a>
+      </div>
+      <h1 class="text-2xl font-bold text-gray-800">🚰 Batch Claim</h1>
+      <p class="text-gray-500 text-sm mt-1">Claim testnet tokens for multiple addresses in one run</p>
     </div>
 
-    <script>
-        // Use dynamic API endpoint for better compatibility
-        const API_ENDPOINT = window.location.origin + '/api/claim';
-        let isProcessing = false;
-        let stats = { total: 0, success: 0, error: 0, pending: 0 };
-        
-        async function startBatchClaim() {
-            if (isProcessing) return;
-            
-            const addressesText = document.getElementById('addresses').value.trim();
-            const blockchain = document.getElementById('blockchain').value;
-            const native = document.getElementById('native').checked;
-            const usdc = document.getElementById('usdc').checked;
-            const eurc = document.getElementById('eurc').checked;
-            
-            // Validation
-            if (!addressesText) {
-                alert('❌ Please enter at least one wallet address');
-                return;
-            }
-            
-            if (!native && !usdc && !eurc) {
-                alert('❌ Please select at least one token to claim');
-                return;
-            }
-            
-            // Parse addresses
-            const addresses = addressesText.split('\n')
-                .map(addr => addr.trim())
-                .filter(addr => addr.length > 0);
-            
-            if (addresses.length === 0) {
-                alert('❌ No valid addresses found');
-                return;
-            }
-            
-            // Initialize
-            isProcessing = true;
-            stats = { total: addresses.length, success: 0, error: 0, pending: addresses.length };
-            updateStats();
-            
-            const submitBtn = document.getElementById('submitBtn');
-            submitBtn.disabled = true;
-            submitBtn.textContent = 'Processing...';
-            
-            const progressDiv = document.getElementById('progress');
-            progressDiv.classList.add('active');
-            
-            const addressListDiv = document.getElementById('addressList');
-            addressListDiv.classList.add('active');
-            addressListDiv.innerHTML = '';
-            
-            // Create address items
-            const addressItems = addresses.map((addr, index) => {
-                const item = document.createElement('div');
-                item.className = 'address-item pending';
-                item.id = `addr-${index}`;
-                item.innerHTML = `
-                    <div class="status-icon">⏳</div>
-                    <div class="address-text">${addr}</div>
-                    <div class="status-text">Waiting...</div>
-                `;
-                addressListDiv.appendChild(item);
-                return { element: item, address: addr, index };
-            });
-            
-            // Process each address
-            for (let i = 0; i < addressItems.length; i++) {
-                const { element, address, index } = addressItems[i];
-                
-                // Update UI to processing
-                element.className = 'address-item processing';
-                element.querySelector('.status-icon').innerHTML = '<div class="loading-spinner"></div>';
-                element.querySelector('.status-text').textContent = 'Claiming...';
-                
-                // Update progress
-                const progress = Math.round(((i) / addresses.length) * 100);
-                updateProgress(progress, `Processing ${i + 1} of ${addresses.length}...`);
-                
-                // Make claim request
-                try {
-                    const result = await claimTokens(address, blockchain, native, usdc, eurc);
-                    
-                    if (result.success) {
-                        element.className = 'address-item success';
-                        element.querySelector('.status-icon').textContent = '✅';
-                        element.querySelector('.status-text').textContent = 'Success!';
-                        stats.success++;
-                    } else {
-                        element.className = 'address-item error';
-                        element.querySelector('.status-icon').textContent = '❌';
-                        element.querySelector('.status-text').textContent = result.error || 'Failed';
-                        stats.error++;
-                    }
-                } catch (error) {
-                    element.className = 'address-item error';
-                    element.querySelector('.status-icon').textContent = '❌';
-                    element.querySelector('.status-text').textContent = error.message;
-                    stats.error++;
-                }
-                
-                stats.pending--;
-                updateStats();
-                
-                // Add delay between requests to avoid rate limiting
-                if (i < addressItems.length - 1) {
-                    await sleep(2000); // 2 second delay between claims
-                }
-            }
-            
-            // Complete
-            updateProgress(100, `Completed! ${stats.success} successful, ${stats.error} failed`);
-            submitBtn.disabled = false;
-            submitBtn.textContent = 'Start Batch Claim';
-            isProcessing = false;
+    <!-- Mode selection -->
+    <div class="bg-white rounded-2xl shadow-2xl p-8 mb-6">
+      <h2 class="text-lg font-semibold text-gray-700 mb-4">1 — Authentication</h2>
+
+      <div class="grid grid-cols-2 gap-3 mb-5">
+        <button id="btnOwnKey" onclick="setMode('own-key')"
+          class="p-4 rounded-lg border-2 border-purple-600 bg-purple-50 text-left transition-all">
+          <div class="text-sm font-bold text-gray-800">🔑 My API Key</div>
+          <div class="text-xs text-gray-500 mt-1">You manage your quota</div>
+        </button>
+        <button id="btnDefault" onclick="setMode('default')"
+          class="p-4 rounded-lg border-2 border-gray-200 hover:border-purple-300 text-left transition-all">
+          <div class="text-sm font-bold text-gray-800">🔒 Default Faucet</div>
+          <div class="text-xs text-gray-500 mt-1">Password required · 1 claim/wallet/day</div>
+        </button>
+      </div>
+
+      <!-- API key input -->
+      <div id="apiKeySection">
+        <label class="block text-sm font-semibold text-gray-700 mb-1">Circle API Key *</label>
+        <input id="userApiKey" type="password" placeholder="TEST_API_KEY:xxx:xxx"
+          class="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-purple-600 focus:outline-none text-sm" />
+        <p class="text-xs text-gray-500 mt-1">
+          Circle enforces ~5–10 claims/day per key.
+          <a href="https://developers.circle.com/w3s/circle-developer-account" target="_blank"
+            class="text-purple-600 hover:underline">Get a free key →</a>
+        </p>
+      </div>
+
+      <!-- Password input -->
+      <div id="passwordSection" class="hidden">
+        <label class="block text-sm font-semibold text-gray-700 mb-1">Faucet Password *</label>
+        <input id="password" type="password" placeholder="Enter faucet password"
+          class="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-purple-600 focus:outline-none text-sm" />
+      </div>
+    </div>
+
+    <!-- Claim config -->
+    <div class="bg-white rounded-2xl shadow-2xl p-8 mb-6">
+      <h2 class="text-lg font-semibold text-gray-700 mb-4">2 — Claim Settings</h2>
+
+      <!-- Network -->
+      <div class="mb-5">
+        <label class="block text-sm font-semibold text-gray-700 mb-1">Blockchain Network *</label>
+        <select id="blockchain"
+          class="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-purple-600 focus:outline-none bg-white text-sm">
+          <option value="ARC-TESTNET">ARC-TESTNET</option>
+          <option value="ETH-SEPOLIA">ETH-SEPOLIA</option>
+          <option value="AVAX-FUJI">AVAX-FUJI</option>
+          <option value="MATIC-AMOY">MATIC-AMOY</option>
+          <option value="SOL-DEVNET">SOL-DEVNET</option>
+          <option value="ARB-SEPOLIA">ARB-SEPOLIA</option>
+          <option value="UNI-SEPOLIA">UNI-SEPOLIA</option>
+          <option value="BASE-SEPOLIA">BASE-SEPOLIA</option>
+          <option value="OP-SEPOLIA">OP-SEPOLIA</option>
+          <option value="APTOS-TESTNET">APTOS-TESTNET</option>
+        </select>
+      </div>
+
+      <!-- Tokens -->
+      <div class="mb-5">
+        <label class="block text-sm font-semibold text-gray-700 mb-2">Tokens to Claim *</label>
+        <div class="flex gap-3 flex-wrap">
+          <label class="flex items-center gap-2 px-4 py-2 border-2 border-gray-200 rounded-lg cursor-pointer hover:border-purple-300 transition-colors text-sm">
+            <input type="checkbox" id="native" class="accent-purple-600"> Native
+          </label>
+          <label class="flex items-center gap-2 px-4 py-2 border-2 border-purple-600 bg-purple-50 rounded-lg cursor-pointer text-sm">
+            <input type="checkbox" id="usdc" checked class="accent-purple-600"> USDC
+          </label>
+          <label class="flex items-center gap-2 px-4 py-2 border-2 border-gray-200 rounded-lg cursor-pointer hover:border-purple-300 transition-colors text-sm">
+            <input type="checkbox" id="eurc" class="accent-purple-600"> EURC
+          </label>
+        </div>
+      </div>
+
+      <!-- Delay -->
+      <div>
+        <label class="block text-sm font-semibold text-gray-700 mb-1">
+          Delay between claims: <span id="delayLabel">2 s</span>
+        </label>
+        <input id="delay" type="range" min="1000" max="10000" step="500" value="2000"
+          oninput="document.getElementById('delayLabel').textContent = (this.value/1000).toFixed(1) + ' s'"
+          class="w-full accent-purple-600" />
+        <p class="text-xs text-gray-400 mt-1">Circle enforces per-IP limits; a small delay reduces 429 errors.</p>
+      </div>
+    </div>
+
+    <!-- Addresses -->
+    <div class="bg-white rounded-2xl shadow-2xl p-8 mb-6">
+      <h2 class="text-lg font-semibold text-gray-700 mb-4">3 — Wallet Addresses</h2>
+      <textarea id="addresses" rows="6" placeholder="0xabc...&#10;0xdef...&#10;0x123..."
+        class="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-purple-600 focus:outline-none font-mono text-sm resize-y"></textarea>
+      <p class="text-xs text-gray-400 mt-1">One address per line. Lines starting with # are ignored.</p>
+    </div>
+
+    <!-- Run button -->
+    <button id="startBtn" onclick="startBatch()"
+      class="w-full bg-gradient-to-r from-purple-600 to-indigo-600 text-white py-4 rounded-xl font-bold text-lg hover:from-purple-700 hover:to-indigo-700 transition-all shadow-lg hover:shadow-xl mb-6">
+      Start Batch Claim
+    </button>
+
+    <!-- Progress -->
+    <div id="progressSection" class="hidden bg-white rounded-2xl shadow-2xl p-8 mb-6">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-gray-700">Progress</h2>
+        <button id="stopBtn" onclick="stopBatch()"
+          class="text-sm text-red-500 hover:text-red-700 font-semibold px-3 py-1 border border-red-200 rounded-lg">
+          Stop
+        </button>
+      </div>
+
+      <!-- Bar -->
+      <div class="w-full bg-gray-100 rounded-full h-4 mb-3 overflow-hidden">
+        <div id="progressBar" class="h-4 bg-gradient-to-r from-purple-500 to-indigo-500 rounded-full transition-all duration-300" style="width:0%"></div>
+      </div>
+      <p id="progressText" class="text-sm text-gray-600 mb-4">Starting…</p>
+
+      <!-- Stats -->
+      <div class="grid grid-cols-4 gap-3 mb-6">
+        <div class="text-center p-3 bg-gray-50 rounded-lg">
+          <div id="statTotal"   class="text-2xl font-bold text-gray-700">0</div>
+          <div class="text-xs text-gray-500 mt-1">Total</div>
+        </div>
+        <div class="text-center p-3 bg-green-50 rounded-lg">
+          <div id="statSuccess" class="text-2xl font-bold text-green-600">0</div>
+          <div class="text-xs text-gray-500 mt-1">Success</div>
+        </div>
+        <div class="text-center p-3 bg-red-50 rounded-lg">
+          <div id="statFail"    class="text-2xl font-bold text-red-500">0</div>
+          <div class="text-xs text-gray-500 mt-1">Failed</div>
+        </div>
+        <div class="text-center p-3 bg-yellow-50 rounded-lg">
+          <div id="statPending" class="text-2xl font-bold text-yellow-500">0</div>
+          <div class="text-xs text-gray-500 mt-1">Pending</div>
+        </div>
+      </div>
+
+      <!-- Result list -->
+      <div id="resultList" class="space-y-2 max-h-96 overflow-y-auto"></div>
+    </div>
+
+  </div>
+
+  <script>
+    // -----------------------------------------------------------------------
+    // State
+    // -----------------------------------------------------------------------
+    let currentMode = 'own-key';
+    let shouldStop  = false;
+
+    // -----------------------------------------------------------------------
+    // Mode toggle
+    // -----------------------------------------------------------------------
+    function setMode(mode) {
+      currentMode = mode;
+      const isOwn = mode === 'own-key';
+      document.getElementById('btnOwnKey').className =
+        'p-4 rounded-lg border-2 text-left transition-all ' +
+        (isOwn ? 'border-purple-600 bg-purple-50' : 'border-gray-200 hover:border-purple-300');
+      document.getElementById('btnDefault').className =
+        'p-4 rounded-lg border-2 text-left transition-all ' +
+        (!isOwn ? 'border-purple-600 bg-purple-50' : 'border-gray-200 hover:border-purple-300');
+      document.getElementById('apiKeySection').classList.toggle('hidden',  !isOwn);
+      document.getElementById('passwordSection').classList.toggle('hidden', isOwn);
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch runner
+    // -----------------------------------------------------------------------
+    async function startBatch() {
+      const rawAddresses = document.getElementById('addresses').value;
+      const blockchain   = document.getElementById('blockchain').value;
+      const native       = document.getElementById('native').checked;
+      const usdc         = document.getElementById('usdc').checked;
+      const eurc         = document.getElementById('eurc').checked;
+      const delay        = parseInt(document.getElementById('delay').value, 10);
+      const userApiKey   = document.getElementById('userApiKey').value.trim();
+      const password     = document.getElementById('password').value.trim();
+
+      // Validation
+      if (currentMode === 'own-key' && !userApiKey) {
+        alert('Please enter your Circle API key'); return;
+      }
+      if (currentMode === 'default' && !password) {
+        alert('Please enter the faucet password'); return;
+      }
+      if (!native && !usdc && !eurc) {
+        alert('Please select at least one token'); return;
+      }
+
+      const addresses = rawAddresses
+        .split('\n')
+        .map(l => l.trim())
+        .filter(l => l && !l.startsWith('#'));
+
+      if (!addresses.length) { alert('No valid addresses found'); return; }
+
+      // Init UI
+      shouldStop = false;
+      document.getElementById('startBtn').disabled  = true;
+      document.getElementById('startBtn').textContent = 'Running…';
+      document.getElementById('progressSection').classList.remove('hidden');
+      document.getElementById('resultList').innerHTML = '';
+      setStats({ total: addresses.length, success: 0, fail: 0, pending: addresses.length });
+
+      let success = 0, fail = 0;
+
+      for (let i = 0; i < addresses.length; i++) {
+        if (shouldStop) break;
+
+        const addr = addresses[i];
+        const pct  = Math.round(((i) / addresses.length) * 100);
+        document.getElementById('progressBar').style.width = pct + '%';
+        document.getElementById('progressText').textContent =
+          `Processing ${i + 1} / ${addresses.length} — ${addr.slice(0, 14)}…`;
+
+        // Build request body — FIX: always include mode + auth credential
+        const body = {
+          address:    addr,
+          blockchain,
+          native,
+          usdc,
+          eurc,
+          mode:       currentMode,
+          ...(currentMode === 'own-key'
+            ? { apiKey: userApiKey }
+            : { password }),
+        };
+
+        let status = 'pending';
+        let label  = '';
+
+        try {
+          const res  = await fetch('/api/claim', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify(body),
+          });
+          const data = await res.json();
+
+          if (res.ok) {
+            status = 'success';
+            label  = data.transactionId ? `TX: ${data.transactionId.slice(0, 18)}…` : 'Claimed';
+            success++;
+          } else if (res.status === 429) {
+            status = 'skip';
+            label  = data.message ?? 'Rate limited / already claimed';
+          } else {
+            status = 'fail';
+            label  = data.message ?? data.error ?? `HTTP ${res.status}`;
+            fail++;
+          }
+        } catch (err) {
+          status = 'fail';
+          label  = 'Network error: ' + err.message;
+          fail++;
         }
-        
-        async function claimTokens(address, blockchain, native, usdc, eurc) {
-            const requestData = {
-                address: address,
-                blockchain: blockchain,
-                native: native,
-                usdc: usdc,
-                eurc: eurc
-            };
-            
-            try {
-                const response = await fetch(API_ENDPOINT, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(requestData)
-                });
-                
-                const data = await response.json();
-                
-                if (response.ok) {
-                    return { success: true, data: data };
-                } else {
-                    return { success: false, error: data.message || data.error || 'Unknown error' };
-                }
-            } catch (error) {
-                return { success: false, error: error.message };
-            }
+
+        appendResult(addr, status, label);
+        setStats({ total: addresses.length, success, fail, pending: addresses.length - i - 1 });
+
+        // Delay (skip on last)
+        if (i < addresses.length - 1 && !shouldStop) {
+          await sleep(delay);
         }
-        
-        function updateProgress(percent, text) {
-            const progressFill = document.getElementById('progressFill');
-            const progressText = document.getElementById('progressText');
-            
-            progressFill.style.width = percent + '%';
-            progressFill.textContent = percent + '%';
-            progressText.textContent = text;
-        }
-        
-        function updateStats() {
-            document.getElementById('totalCount').textContent = stats.total;
-            document.getElementById('successCount').textContent = stats.success;
-            document.getElementById('errorCount').textContent = stats.error;
-            document.getElementById('pendingCount').textContent = stats.pending;
-        }
-        
-        function sleep(ms) {
-            return new Promise(resolve => setTimeout(resolve, ms));
-        }
-    </script>
+      }
+
+      // Done
+      const pct = shouldStop ? document.getElementById('progressBar').style.width : '100%';
+      document.getElementById('progressBar').style.width = pct;
+      document.getElementById('progressText').textContent =
+        shouldStop
+          ? `Stopped. ${success} succeeded, ${fail} failed.`
+          : `Done! ${success} succeeded, ${fail} failed.`;
+
+      document.getElementById('startBtn').disabled  = false;
+      document.getElementById('startBtn').textContent = 'Start Batch Claim';
+    }
+
+    function stopBatch() { shouldStop = true; }
+
+    // -----------------------------------------------------------------------
+    // UI helpers
+    // -----------------------------------------------------------------------
+    function setStats({ total, success, fail, pending }) {
+      document.getElementById('statTotal').textContent   = total;
+      document.getElementById('statSuccess').textContent = success;
+      document.getElementById('statFail').textContent    = fail;
+      document.getElementById('statPending').textContent = pending;
+    }
+
+    function appendResult(addr, status, label) {
+      const colors = {
+        success: 'bg-green-50 border-green-200',
+        fail:    'bg-red-50   border-red-200',
+        skip:    'bg-yellow-50 border-yellow-200',
+      };
+      const icons  = { success: '✅', fail: '❌', skip: '⏭️' };
+      const div    = document.createElement('div');
+      div.className = `flex items-start gap-3 p-3 rounded-lg border-2 ${colors[status] ?? 'bg-gray-50 border-gray-200'} text-sm`;
+      div.innerHTML = `
+        <span class="flex-shrink-0 mt-0.5">${icons[status] ?? '•'}</span>
+        <span class="font-mono flex-1 break-all text-gray-800">${addr}</span>
+        <span class="flex-shrink-0 text-gray-600 text-xs">${label}</span>
+      `;
+      const list = document.getElementById('resultList');
+      list.appendChild(div);
+      list.scrollTop = list.scrollHeight;
+    }
+
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    // Token checkbox border styling
+    document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const label = cb.closest('label');
+        if (!label) return;
+        if (cb.checked) { label.classList.add('border-purple-600', 'bg-purple-50'); label.classList.remove('border-gray-200'); }
+        else            { label.classList.remove('border-purple-600', 'bg-purple-50'); label.classList.add('border-gray-200'); }
+      });
+    });
+  </script>
 </body>
 </html>
