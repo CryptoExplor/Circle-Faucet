@@ -1,19 +1,18 @@
 /**
  * Persistent Analytics Module — Vercel KV (Redis)
  *
- * FIX: Key rotation used a read-modify-write cycle with no atomicity.
- * Two concurrent requests would read the same index, both write index+1,
- * and effectively skip a key — or worse, cause a thundering-herd on key_0.
+ * FIX (original): Key rotation used a read-modify-write cycle with no atomicity.
+ * Fixed by using kv.incr() for the rotation counter.
  *
- * Fix: use kv.incr() for the rotation counter so the increment is atomic.
- * All other analytics writes use a single kv.set() per request (last-write-wins
- * is acceptable for counters; we use hincrby-style field isolation instead).
+ * FIX (v2 migration): Renamed KV key from faucet:analytics:v1 → faucet:stats:v2.
+ * readStats() now checks v1 on first run and migrates the data forward automatically.
  */
 
 import { kv } from '@vercel/kv';
 
 // Keys
 const KEY_STATS        = 'faucet:stats:v2';
+const KEY_STATS_V1     = 'faucet:analytics:v1'; // legacy — read once for migration only
 const KEY_ROTATION_CTR = 'faucet:rotation_ctr'; // atomic counter — never read-modify-write this
 const KEY_LAST_RESET   = 'faucet:last_reset';
 
@@ -33,11 +32,27 @@ const DEFAULT_STATS = {
 async function readStats() {
   try {
     const data = await kv.get(KEY_STATS);
-    if (!data) {
-      await kv.set(KEY_STATS, DEFAULT_STATS);
-      return { ...DEFAULT_STATS };
+
+    if (data) return data;
+
+    // v2 key is empty — check whether old v1 data exists and migrate it once.
+    const legacy = await kv.get(KEY_STATS_V1).catch(() => null);
+    if (legacy && typeof legacy === 'object') {
+      const migrated = {
+        ...DEFAULT_STATS,
+        ...legacy,
+        claimsByMode:    { 'own-key': 0, default: 0, ...(legacy.claimsByMode ?? {}) },
+        claimsByNetwork: legacy.claimsByNetwork ?? {},
+        keyUsage:        legacy.keyUsage ?? {},
+      };
+      await kv.set(KEY_STATS, migrated);
+      console.log('[ANALYTICS] migrated v1 -> v2, totalClaims:', migrated.totalClaims);
+      return migrated;
     }
-    return data;
+
+    // Genuinely fresh install
+    await kv.set(KEY_STATS, DEFAULT_STATS);
+    return { ...DEFAULT_STATS };
   } catch (err) {
     console.error('[ANALYTICS] KV read failed, using in-process fallback:', err.message);
     if (!global.__faucetStats) global.__faucetStats = { ...DEFAULT_STATS };
@@ -48,7 +63,7 @@ async function readStats() {
 async function writeStats(data) {
   try {
     await kv.set(KEY_STATS, data);
-    global.__faucetStats = data; // keep in-process copy as warm fallback
+    global.__faucetStats = data;
   } catch (err) {
     console.error('[ANALYTICS] KV write failed:', err.message);
     global.__faucetStats = data;
@@ -59,13 +74,6 @@ async function writeStats(data) {
 // Public API
 // ---------------------------------------------------------------------------
 
-/**
- * Record a claim attempt.
- * @param {string}      mode       'own-key' | 'default'
- * @param {string}      blockchain  e.g. 'ETH-SEPOLIA'
- * @param {boolean}     success
- * @param {number|null} keyIndex   rotation index used (default mode only)
- */
 export async function updateAnalytics(mode, blockchain, success, keyIndex = null) {
   try {
     const stats = await readStats();
@@ -83,7 +91,6 @@ export async function updateAnalytics(mode, blockchain, success, keyIndex = null
     }
 
     await writeStats(stats);
-
     console.log('[ANALYTICS] updated', { mode, blockchain, success, keyIndex, total: stats.totalClaims });
   } catch (err) {
     console.error('[ANALYTICS] updateAnalytics error:', err.message);
@@ -92,14 +99,10 @@ export async function updateAnalytics(mode, blockchain, success, keyIndex = null
 
 /**
  * Atomically advance the rotation counter and return the key index to use.
- * Uses kv.incr() so concurrent requests never collide.
- *
- * @param {number} totalKeys  total number of API keys configured
- * @returns {Promise<number>} index in [0, totalKeys)
+ * kv.incr() is atomic — concurrent requests never collide.
  */
 export async function getNextKeyIndex(totalKeys) {
   try {
-    // incr returns the value AFTER increment (1-based), so subtract 1 for 0-based index
     const raw = await kv.incr(KEY_ROTATION_CTR);
     return (raw - 1) % totalKeys;
   } catch (err) {
@@ -108,30 +111,22 @@ export async function getNextKeyIndex(totalKeys) {
   }
 }
 
-/**
- * @deprecated  Use getNextKeyIndex(totalKeys) instead.
- * Kept for backwards compat — callers in claim.js that still use the old API.
- */
+/** @deprecated Use getNextKeyIndex(totalKeys). Kept for backwards compat. */
 export async function getCurrentKeyIndex() {
   try {
     const raw = await kv.get(KEY_ROTATION_CTR);
-    return typeof raw === 'number' ? raw % 1000000 : 0; // guard against unbounded growth in display
+    return typeof raw === 'number' ? raw % 1_000_000 : 0;
   } catch {
     return 0;
   }
 }
 
-/** No longer needed — rotation is driven by getNextKeyIndex. Kept for compat. */
-export async function setCurrentKeyIndex(_index) {
-  // no-op: rotation counter is now exclusively managed by kv.incr()
-}
+/** @deprecated No-op. Rotation counter is managed by kv.incr() only. */
+export async function setCurrentKeyIndex(_index) {}
 
-/**
- * Full analytics snapshot for /api/stats.
- */
 export async function getAnalytics() {
   try {
-    const stats = await readStats();
+    const stats      = await readStats();
     const rotationRaw = await kv.get(KEY_ROTATION_CTR).catch(() => 0);
     const lastReset   = await kv.get(KEY_LAST_RESET).catch(() => Date.now());
 
@@ -144,7 +139,7 @@ export async function getAnalytics() {
       ...stats,
       uptime,
       successRate,
-      currentKeyIndex: typeof rotationRaw === 'number' ? rotationRaw % 1000000 : 0,
+      currentKeyIndex: typeof rotationRaw === 'number' ? rotationRaw % 1_000_000 : 0,
     };
   } catch (err) {
     console.error('[ANALYTICS] getAnalytics error:', err.message);
@@ -152,9 +147,6 @@ export async function getAnalytics() {
   }
 }
 
-/**
- * Hard reset — wipes all counters.
- */
 export async function resetAnalytics() {
   const fresh = { ...DEFAULT_STATS };
   await writeStats(fresh);
