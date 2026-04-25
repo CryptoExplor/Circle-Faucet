@@ -111,6 +111,40 @@
 
     <!-- API Key Input -->
     <div id="apiKeySection" class="mb-6">
+
+      <!-- ⚠️ Mainnet upgrade notice -->
+      <div class="mb-4 rounded-xl border-2 border-amber-400 bg-amber-50 p-4">
+        <div class="flex items-start gap-3">
+          <span class="text-2xl flex-shrink-0">⚠️</span>
+          <div class="flex-1 min-w-0">
+            <p class="text-sm font-bold text-amber-900 mb-1">
+              API Key requires a Mainnet-upgraded Circle account
+            </p>
+            <p class="text-xs text-amber-800 mb-3 leading-relaxed">
+              The programmatic faucet API (<code class="bg-amber-100 px-1 rounded font-mono">/v1/faucet/drips</code>) 
+              only works if your Circle account has completed mainnet verification — even when claiming 
+              <strong>testnet</strong> tokens. This is an account permission, not a token restriction.
+            </p>
+            <a
+              href="https://console.circle.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="inline-flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold px-4 py-2 rounded-lg transition-colors shadow-sm"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <line x1="10" y1="14" x2="21" y2="3"></line>
+              </svg>
+              Upgrade at console.circle.com →
+            </a>
+            <p class="text-xs text-amber-700 mt-2">
+              Upgrading is free. It unlocks the API — you don't have to use mainnet funds.
+            </p>
+          </div>
+        </div>
+      </div>
+
       <label class="block text-sm font-semibold text-gray-700 mb-2">
         Your Circle API Key *
       </label>
@@ -127,12 +161,11 @@
           <line x1="12" y1="8" x2="12.01" y2="8"></line>
         </svg>
         <p>
-          <strong>Note:</strong> Circle enforces their own per-key limits (typically 5-10 claims per day). 
-          We don't restrict your usage - use until you hit Circle's limit, then switch API keys if needed.
+          <strong>Note:</strong> Circle enforces per-key limits (typically 5–10 claims/day).
+          Switch API keys if you hit the limit.
         </p>
       </div>
     </div>
-
     <!-- Password Input -->
     <div id="passwordSection" class="mb-6 hidden">
       <label class="block text-sm font-semibold text-gray-700 mb-2">
