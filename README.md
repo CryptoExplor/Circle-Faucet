@@ -1,5 +1,9 @@
 # Circle Faucet - Multi-Key Testnet Token Claimer
 
+> ### 🤖 Looking for the **Pro Bot**? Claim 150K+ wallets across 32 chains with stealth bypass and proxy rotation → [**PRO.md**](./PRO.md)
+
+> ### 🤖 Looking for the **Pro Bot**? Claim 150K+ wallets across 32 chains with stealth bypass and proxy rotation → [**PRO.md**](./PRO.md)
+
 A secure, serverless web application for claiming testnet tokens from Circle's faucet with support for user-provided API keys and a password-protected default faucet with smart key rotation, automatic fallback, and **persistent analytics powered by Vercel KV**.
 
 ## 🎯 Features
@@ -45,20 +49,14 @@ A secure, serverless web application for claiming testnet tokens from Circle's f
 
 ## 🔄 How Key Rotation & Fallback Works
 
-### Round-Robin Rotation (atomic)
-The default faucet uses a **round-robin rotation strategy** persisted in Vercel KV and advanced with a single atomic `INCR`:
+### Round-Robin Rotation
+The default faucet uses a **round-robin rotation strategy** persisted in Vercel KV:
 
-1. Each claim attempt increments the shared counter and uses key `(counter - 1) % keyCount`.
-2. Two concurrent claims always get different keys — no read-modify-write races, and no stale-index failures after you add or remove keys.
-
-### Fallback rules (v2.1.1)
-A faucet drip is a **non-idempotent POST**, so the fallback is deliberately conservative:
-
-- **HTTP 429 from Circle** → definitive rejection: this key is exhausted, the next key is tried (up to 3 attempts).
-- **Any other HTTP error** → definitive rejection: no retry with other keys (it would fail identically).
-- **Timeout / transport error** → outcome UNKNOWN (the drip may exist on-chain): **never retried**. The API returns `503 Outcome unknown` and asks the user to check the wallet before retrying. For default-mode claims the per-wallet lock is kept so the drip cannot be doubled.
-
-Each request runs under a shared deadline (~8.5 s, per-request timeout 4 s) so a hanging connection cannot consume the whole serverless function budget (maxDuration 10 s).
+1. **First claim** → Uses API Key #1
+2. **Second claim** → Uses API Key #2
+3. **Third claim** → Uses API Key #3
+4. **Fourth claim** → Cycles back to API Key #1
+5. And so on...
 
 ### Automatic Fallback
 If a key fails or is rate-limited, the system automatically tries the next key:
@@ -78,10 +76,9 @@ Try Key #1 → Rate Limited (429) → Try Key #2 → Success! ✅
 **Benefits:**
 - ✅ High reliability - no single point of failure
 - ✅ Maximizes success rate
-- ✅ Distributes load evenly across all keys (atomic, fair under concurrency)
+- ✅ Distributes load evenly across all keys
 - ✅ Automatic recovery from key exhaustion
 - ✅ No manual intervention needed
-- ✅ Never double-drips: ambiguous outcomes are reported, not retried
 
 **Example with 3 API keys:**
 ```
@@ -102,8 +99,6 @@ Access real-time [analytics](https://circle-api-faucet.vercel.app/analytics.html
 - System uptime
 
 **API Endpoint:** `GET /api/stats`
-
-Counters are atomic Redis increments (`INCR`/`HINCRBY`) — concurrent claims can never overwrite each other. Set `ADMIN_STATS_TOKEN` to require an `x-admin-token` header for key-pool details (`keyUsage`, `currentKeyIndex`, `availableKeys`); aggregate counters stay public. `storageType` reports `unavailable` if KV cannot be reached, instead of silently serving empty numbers.
 
 **🆕 Powered by Vercel KV:**
 - ✅ **Persistent** - Data survives cold starts and restarts
@@ -255,16 +250,11 @@ node -e "console.log(require('crypto').createHash('sha256').update('your_passwor
 
 ### Rate Limiting Strategy
 
-All limits are stored in Vercel KV with **atomic commands** (`SET NX EX`, `INCR`/`DECR`), so they hold across serverless instances and cold starts. Wallet addresses are validated and canonicalized per chain before they are hashed into limit identifiers (letter case or whitespace variants of the same address share one quota).
-
 | Mode | Limit | Window | Identifier | Key Usage |
 |------|-------|--------|------------|-----------|
 | User API Key | Circle's limit (5-10/day) | 24 hours | User's key | Single key |
-| Default Faucet | 1 claim per wallet/network | 24 hours | Canonical wallet + network | Round-robin with fallback |
-| Default Faucet | 3 claims | 24 hours | IP address | Round-robin with fallback |
+| Default Faucet | 1 claim per wallet/network | 24 hours | Wallet + Network | Round-robin with fallback |
 | Infrastructure | 100 requests | 1 hour | IP address | All modes |
-
-A failed claim (Circle definitively rejected it) **releases** the wallet lock and the IP reservation; an ambiguous outcome (lost response) **keeps** them to prevent double claims.
 
 ## 📖 Usage Guide
 
@@ -611,35 +601,16 @@ Example:
 - **Auto-added:** KV environment variables
 - **Migration:** Analytics reset on first deploy (fresh start)
 
-## 🧪 Testing
+## 🆕 What's New in v2.1.2 (review hardening)
 
-```bash
-npm install
-npm test
-```
-
-The suite (`tests/`) runs on the built-in Node test runner with an in-memory atomic KV fake and a fake Circle transport — no network or Redis required. It covers, among others:
-
-- 50 concurrent analytics updates persist exactly 50 increments (lost-update regression test)
-- exactly ONE of N concurrent duplicate claims wins the wallet lock
-- case/whitespace address variants share one quota; malformed addresses are rejected
-- `__proto__`-style chain identifiers are rejected by the allowlist
-- fallback: 429 advances to the next key; other errors and transport failures never re-send the drip
-- a definitively failed claim releases the wallet lock/IP quota; an ambiguous one keeps them
-
-## 🆕 What's New in v2.1.1 (security & correctness rewrite)
-
-- ✅ **Atomic shared state** — wallet locks, IP limits, key rotation and analytics all use single atomic KV commands (`SET NX EX`, `INCR`, `HINCRBY`). The previous read-modify-write JSON blob lost up to 19/20 concurrent updates and let limits be bypassed by parallel requests or cold starts.
-- ✅ **Address canonicalization** — per-chain validation + normalization closes the case/whitespace rate-limit bypass.
-- ✅ **Prototype-safe allowlist** — `__proto__`/`constructor` can no longer pass chain validation.
-- ✅ **Constant-time password comparison** and corrected password-hash docs.
-- ✅ **Non-idempotent-safe retries** — ambiguous failures are reported (`503 Outcome unknown`), never retried; only definitive 429s rotate keys.
-- ✅ **Claim locks are transactional** — released on definitive failure, kept on ambiguous outcome.
-- ✅ **Real IP daily limit (3/24h)** for the default faucet, as already advertised in the UI.
-- ✅ **Budgeted outbound calls** — 4 s per request inside an ~8.5 s deadline, within `maxDuration: 10`.
-- ✅ **XSS-hardened dashboards** — all upstream/user-derived strings rendered via `textContent`.
-- ✅ **Committed `package-lock.json`** for reproducible deploys.
-- ✅ **Test suite** (`npm test`) covering the concurrency and state-machine invariants above.
+- ✅ **No more lock leaks** — any internal error after the wallet lock/IP reservation is taken (e.g. a KV blip during key rotation) releases both; nothing is ever dispensed yet nothing is burned.
+- ✅ **Bounded KV client** — retries disabled and every KV command raced against a ~1.5s deadline, so a dead or hanging KV can no longer 504 the whole function (measured: 11.7s → ~4ms on a dead endpoint).
+- ✅ **Gateway 5xx/408 treated as UNKNOWN** — a 502/504 from Circle's edge may have executed the drip; the wallet lock is kept and the user is told to check their balance instead of being allowed an immediate double claim.
+- ✅ **Fail-closed password config** — a malformed `DEFAULT_PASSWORD_HASH` (including the published placeholder) can never authenticate, not even by typing the placeholder itself.
+- ✅ **Aptos addresses sent as written** — canonical identity (zero-padded) is used only for quota keys; Circle receives the user's trimmed address. Fixed a precedence bug in the fallback expression.
+- ✅ **Configurable IP limits** — `IP_DAILY_LIMIT` (default 3) and `IP_INFRA_LIMIT` (default 100), UTC calendar buckets, IPv6 aggregated by /64, correct `resetTime`. Batch claiming from one IP is capped by the daily limit by design.
+- ✅ **Cheaper KV usage** — analytics increments pipelined (1 round trip), `/api/stats` cached ~5s, infra guard moved behind cheap validation so junk requests cost zero KV commands.
+- ✅ **Real-transport tests** — the HTTPS requester (timeouts, oversized responses, non-JSON bodies) is now covered by tests against a local TLS server.
 
 ## 🤝 Contributing
 
@@ -687,4 +658,22 @@ MIT License - see [LICENSE](LICENSE) file for details
 
 Need help? [Open an issue](https://github.com/CryptoExplor/Circle-Faucet/issues) or DM [@dare_3 on Telegram](https://t.me/dare_3)
 
+---
+
+### 🤖 Want the Pro Bot?
+
+Need to claim tokens for **thousands of wallets** across **32+ chains** without rate limits? Check out the [**Circle Faucet Pro Bot v9.0**](./PRO.md) — stealth bypass, proxy rotation, multi-chain batching, and more.
+
+**Contact:** [@dare_3 on Telegram](https://t.me/dare_3)
+
+---
+
 `circle faucet` · `circle testnet` · `circle faucet bot` · `circle faucet claimer` · `circle usdc faucet` · `testnet token claimer` · `circle faucet automation` · `circle auto claim` · `circle testnet faucet tool` · `base sepolia faucet` · `ethereum sepolia faucet` · `solana devnet faucet` · `circle faucet bypass` · `circle faucet script`
+
+---
+
+### 🤖 Want the Pro Bot?
+
+Need to claim tokens for **thousands of wallets** across **32+ chains** without rate limits? Check out the [**Circle Faucet Pro Bot v9.0**](./PRO.md) — stealth bypass, proxy rotation, multi-chain batching, and more.
+
+**Contact:** [@dare_3 on Telegram](https://t.me/dare_3)

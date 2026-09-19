@@ -2,7 +2,7 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { setKvClientForTests } from '../api/lib/kv.js';
 import { createFakeKv } from './helpers/fake-kv.mjs';
-import { claimWithFallback, makeCircleRequest } from '../api/lib/circle.js';
+import { claimWithFallback } from '../api/lib/circle.js';
 
 beforeEach(() => {
   setKvClientForTests(createFakeKv());
@@ -116,11 +116,36 @@ test('maxAttempts caps fallback regardless of key count', async () => {
   assert.equal(calls, 3, 'capped at 3 attempts');
 });
 
-test('makeCircleRequest parses JSON and resolves non-2xx as data (not rejection)', async () => {
-  const r = await makeCircleRequest('K', {}, 1000, async () => ({
-    statusCode: 403,
-    data: { code: 0, message: 'forbidden' }
-  }));
-  assert.equal(r.statusCode, 403);
-  assert.equal(r.data.message, 'forbidden');
+test('M1: gateway 5xx (502/504) is AMBIGUOUS: never retried, status surfaced', async () => {
+  for (const status of [500, 502, 504]) {
+    let calls = 0;
+    const requester = async () => {
+      calls++;
+      return { statusCode: status, data: { error: 'bad gateway' } };
+    };
+    const r = await claimWithFallback({}, { keys, requester });
+    assert.equal(r.outcome, 'unknown', `${status} must be unknown`);
+    assert.equal(r.statusCode, status);
+    assert.equal(calls, 1, 'never re-sent after a possible execution');
+  }
+});
+
+test('M1: 408 request timeout is AMBIGUOUS', async () => {
+  const requester = async () => ({ statusCode: 408, data: {} });
+  const r = await claimWithFallback({}, { keys, requester });
+  assert.equal(r.outcome, 'unknown');
+  assert.equal(r.statusCode, 408);
+});
+
+test('4xx (other than 408/429) is definitive: circle_error, no retry', async () => {
+  for (const status of [400, 401, 403]) {
+    let calls = 0;
+    const requester = async () => {
+      calls++;
+      return { statusCode: status, data: { code: 0, message: 'rejected' } };
+    };
+    const r = await claimWithFallback({}, { keys, requester });
+    assert.equal(r.outcome, 'circle_error', `${status} is definitive`);
+    assert.equal(calls, 1);
+  }
 });

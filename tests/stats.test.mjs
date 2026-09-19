@@ -10,6 +10,7 @@ import statsHandler from '../api/stats.js';
 beforeEach(() => {
   setKvClientForTests(createFakeKv());
   process.env.CIRCLE_API_KEYS = 'TEST_API_KEY:a:b,TEST_API_KEY:c:d';
+  process.env.STATS_CACHE_MS = '0'; // bypass cache unless a test opts in
   delete process.env.ADMIN_STATS_TOKEN;
 });
 
@@ -62,4 +63,15 @@ test('stats grants key-pool details with the correct admin token', async () => {
   const res = await getStats({ 'x-admin-token': 'sekrit' });
   assert.equal(res.body.keyUsage.key_1, 1);
   assert.equal(res.body.availableKeys, 2);
+});
+
+test('M5: stats responses are cached for the configured TTL', async () => {
+  process.env.STATS_CACHE_MS = '60000';
+  await updateAnalytics('default', 'ETH-SEPOLIA', true, 1);
+  const first = await getStats();
+  // mutate underlying state — the cached snapshot must NOT reflect it
+  await updateAnalytics('default', 'ETH-SEPOLIA', true, 1);
+  const second = await getStats();
+  assert.equal(first.body.totalClaims, 1);
+  assert.equal(second.body.totalClaims, 1, 'served from cache');
 });

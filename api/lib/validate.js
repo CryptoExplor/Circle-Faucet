@@ -4,10 +4,17 @@
  * Security invariants enforced here:
  *  - The chain allowlist is checked with Object.hasOwn (prototype-safe, so
  *    "__proto__" / "constructor" / "toString" can never pass).
- *  - Wallet addresses are canonicalized (trimmed, lower/upper per chain rules)
- *    BEFORE hashing into rate-limit identifiers, so the same wallet cannot
- *    bypass the per-wallet limit by changing letter case or padding.
- *  - Password comparison is constant-time.
+ *  - Wallet addresses are separated into two forms:
+ *      identity — canonical form used ONLY for rate-limit/lock keys, so the
+ *                 same wallet cannot bypass limits by changing letter case,
+ *                 padding, or short/long form;
+ *      wire     — the address actually sent to Circle: the user's trimmed
+ *                 input, lowercased for case-insensitive chains, but never
+ *                 re-encoded (no zero-stripping/padding) so we do not send
+ *                 Circle something the user did not write.
+ *  - Password comparison is constant-time and FAILS CLOSED on a malformed
+ *    stored digest (a placeholder like "your_password_hash_here" can never
+ *    authenticate by being typed back).
  */
 
 import crypto from 'crypto';
@@ -30,6 +37,7 @@ export const SUPPORTED_CHAINS = Object.keys(CHAINS);
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const SOLANA_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const APTOS_ADDRESS = /^0x[0-9a-fA-F]{1,64}$/;
+const HEX64 = /^[0-9a-f]{64}$/i;
 
 /**
  * Validate a chain identifier. Prototype-safe.
@@ -44,16 +52,17 @@ export function isSupportedChain(blockchain) {
 }
 
 /**
- * Validate + canonicalize a wallet address for the given chain.
- * Returns the canonical form, or null if the address is invalid.
- * The canonical form is what MUST be used for rate-limit identifiers.
+ * Validate a wallet address and produce its identity (rate-limit key material)
+ * and wire (Circle payload) forms. Returns null if the address is invalid.
  * @param {string} address
  * @param {string} blockchain
- * @returns {string|null}
+ * @returns {{identity: string, wire: string}|null}
  */
 export function canonicalizeAddress(address, blockchain) {
   if (typeof address !== 'string') return null;
-  const trimmed = address.trim().replace(/^0X/, '0x'); // accept 0X prefix variant
+  // Accept the uppercase 0X prefix (never appears in valid base58, so this
+  // only ever applies to hex-style addresses).
+  const trimmed = address.trim().replace(/^0X/, '0x');
   if (!trimmed || trimmed.length > 128) return null;
 
   const chain = CHAINS[blockchain];
@@ -61,37 +70,50 @@ export function canonicalizeAddress(address, blockchain) {
 
   if (chain.kind === 'evm') {
     if (!EVM_ADDRESS.test(trimmed)) return null;
-    return trimmed.toLowerCase();
+    const lower = trimmed.toLowerCase();
+    return { identity: lower, wire: lower };
   }
   if (chain.kind === 'solana') {
     if (!SOLANA_ADDRESS.test(trimmed)) return null;
-    return trimmed; // base58 is case-sensitive; format is already canonical
+    return { identity: trimmed, wire: trimmed }; // base58 is case-sensitive
   }
-  // aptos
+  // aptos: hex, up to 64 digits. Identity is the zero-padded 64-digit form so
+  // short/long spellings of the same account share one quota. Wire keeps the
+  // user's spelling (lowercased) — we never re-encode what goes to Circle.
   if (!APTOS_ADDRESS.test(trimmed)) return null;
-  return '0x' + trimmed.slice(2).toLowerCase().replace(/^0+/, '') || '0x0';
+  const hex = trimmed.slice(2).toLowerCase();
+  const normalized = hex === '' ? '0'.repeat(64) : hex.padStart(64, '0');
+  return { identity: '0x' + normalized, wire: '0x' + hex };
 }
 
 /**
- * Constant-time comparison of a plaintext input against a stored hex digest
- * (e.g. DEFAULT_PASSWORD_HASH = sha256(password) as 64 hex chars). The input
- * is hashed so digests are fixed-length; the stored digest is hex-decoded.
- * Falls back to hashing a malformed stored value so behavior stays constant.
+ * True when the value is a well-formed sha256 hex digest. Anything else
+ * (including the published placeholder) must be treated as "not configured".
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isSha256Hex(value) {
+  return typeof value === 'string' && HEX64.test(value);
+}
+
+/**
+ * Constant-time comparison of a plaintext input against a stored sha256 hex
+ * digest. FAILS CLOSED: a malformed stored digest returns false (never a
+ * derived comparison that a placeholder could satisfy).
  * @param {string} input plaintext
  * @param {string} expectedHex sha-256 hex digest
  * @returns {boolean}
  */
 export function safeEqualHex(input, expectedHex) {
-  if (typeof input !== 'string' || typeof expectedHex !== 'string') return false;
+  if (typeof input !== 'string' || !isSha256Hex(expectedHex)) return false;
   const digestInput = crypto.createHash('sha256').update(input).digest();
-  const digestExpected = /^[0-9a-fA-F]{64}$/.test(expectedHex)
-    ? Buffer.from(expectedHex, 'hex')
-    : crypto.createHash('sha256').update(expectedHex).digest();
+  const digestExpected = Buffer.from(expectedHex.toLowerCase(), 'hex');
   return crypto.timingSafeEqual(digestInput, digestExpected);
 }
 
 /**
- * Constant-time string comparison (compares SHA-256 digests so length is fixed).
+ * Constant-time string comparison for arbitrary strings (both sides hashed so
+ * length is fixed). Used for the optional admin stats token.
  * @param {string} a
  * @param {string} b
  * @returns {boolean}
@@ -101,6 +123,51 @@ export function safeEqual(a, b) {
   const da = crypto.createHash('sha256').update(a).digest();
   const db = crypto.createHash('sha256').update(b).digest();
   return crypto.timingSafeEqual(da, db);
+}
+
+/**
+ * Rate-limit identity for a client IP. IPv6 addresses are aggregated by /64
+ * so a single prefix cannot rotate through 2^64 addresses; IPv4 is used as-is.
+ * @param {string} ip
+ * @returns {string}
+ */
+export function clientIpBucket(ip) {
+  if (typeof ip !== 'string' || ip.length === 0) return 'unknown';
+  const trimmed = ip.trim();
+  if (!trimmed.includes(':')) return trimmed; // IPv4 or opaque
+  // Normalize and truncate IPv6 to its /64 prefix. Expand enough of the
+  // compressed form: use the first 4 groups after parsing via a URL-safe trick.
+  const expanded = expandIpv6(trimmed);
+  if (!expanded) return trimmed; // unparseable — use as-is (fail visible)
+  return expanded.split(':').slice(0, 4).join(':') + ':/64';
+}
+
+function expandIpv6(addr) {
+  // strip zone id
+  const noZone = addr.split('%')[0];
+  if (!noZone.includes(':')) return null;
+  if (noZone.includes('.')) {
+    // IPv4-mapped tail
+    const lastColon = noZone.lastIndexOf(':');
+    const v4 = noZone.slice(lastColon + 1);
+    if (!/^\d+\.\d+\.\d+\.\d+$/.test(v4)) return null;
+    const parts = v4.split('.').map((n) => parseInt(n, 10).toString(16).padStart(2, '0'));
+    return expandIpv6(noZone.slice(0, lastColon + 1) + parts[0] + parts[1] + ':' + parts[2] + parts[3]);
+  }
+  const pad = (g) => g.padStart(4, '0');
+  const halves = noZone.split('::');
+  if (halves.length > 2) return null;
+  let head = halves[0] ? halves[0].split(':').filter(Boolean) : [];
+  let tail = halves.length === 2 && halves[1] ? halves[1].split(':').filter(Boolean) : [];
+  if (halves.length === 2) {
+    const fill = 8 - head.length - tail.length;
+    if (fill < 0) return null;
+    const groups = [...head, ...Array(fill).fill('0'), ...tail];
+    if (groups.length !== 8) return null;
+    return groups.map(pad).join(':');
+  }
+  if (head.length !== 8) return null;
+  return head.map(pad).join(':');
 }
 
 /**

@@ -47,15 +47,29 @@ export async function updateAnalytics(mode, blockchain, success, keyIndex = null
     const modeField = VALID_MODES.has(mode) ? mode : 'unknown';
     const networkField = FIELD_SANITIZER.test(blockchain) ? blockchain : 'invalid';
 
-    await kv.incr(TOTAL_KEY);
-    await kv.incr(success ? SUCCESS_KEY : FAILED_KEY);
-    await kv.hincrby(MODE_KEY, modeField, 1);
-    await kv.hincrby(NETWORK_KEY, networkField, 1);
-    if (keyIndex !== null && Number.isInteger(keyIndex) && keyIndex >= 0 && keyIndex < 1000) {
-      await kv.hincrby(KEYS_HASH, `key_${keyIndex}`, 1);
+    // One round trip for all increments (pipeline falls back to sequential
+    // commands if the client doesn't provide one). Still atomic per command.
+    if (typeof kv.pipeline === 'function') {
+      const p = kv.pipeline();
+      p.incr(TOTAL_KEY);
+      p.incr(success ? SUCCESS_KEY : FAILED_KEY);
+      p.hincrby(MODE_KEY, modeField, 1);
+      p.hincrby(NETWORK_KEY, networkField, 1);
+      if (keyIndex !== null && Number.isInteger(keyIndex) && keyIndex >= 0 && keyIndex < 1000) {
+        p.hincrby(KEYS_HASH, `key_${keyIndex}`, 1);
+      }
+      p.set(LAST_RESET_KEY, String(getAnalyticsEpoch()), { nx: true });
+      await p.exec();
+    } else {
+      await kv.incr(TOTAL_KEY);
+      await kv.incr(success ? SUCCESS_KEY : FAILED_KEY);
+      await kv.hincrby(MODE_KEY, modeField, 1);
+      await kv.hincrby(NETWORK_KEY, networkField, 1);
+      if (keyIndex !== null && Number.isInteger(keyIndex) && keyIndex >= 0 && keyIndex < 1000) {
+        await kv.hincrby(KEYS_HASH, `key_${keyIndex}`, 1);
+      }
+      await kv.set(LAST_RESET_KEY, String(getAnalyticsEpoch()), { nx: true });
     }
-    // lastReset is created once; resetAnalytics() refreshes it.
-    await kv.set(LAST_RESET_KEY, String(getAnalyticsEpoch()), { nx: true });
 
     console.log('[ANALYTICS_KV] Updated:', { mode: modeField, blockchain: networkField, success, keyIndex });
   } catch (error) {

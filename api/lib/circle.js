@@ -1,20 +1,23 @@
 /**
- * Circle faucet API client (<code>POST /v1/faucet/drips</code>) with bounded,
+ * Circle faucet API client (POST /v1/faucet/drips) with bounded,
  * ambiguity-safe fallback across the configured API keys.
  *
- * Retry semantics (v2.1.1) — a faucet drip is a NON-IDEMPOTENT POST:
- *   - 2xx                    -> definitive success, stop.
- *   - 429                    -> definitive rejection by Circle, the key is
- *                               exhausted -> safe to try the NEXT key.
- *   - any other HTTP status  -> definitive rejection, do NOT retry (the same
- *                               payload will fail identically on other keys).
- *   - transport error / timeout -> OUTCOME UNKNOWN: the drip may or may not
- *                               have been issued. NEVER retry (double-drip
- *                               risk) — surface an "unknown outcome" result
- *                               instead.
+ * Retry semantics (v2.1.2) — a faucet drip is a NON-IDEMPOTENT POST, and a
+ * rejected-vs-executed distinction must be conservative:
+ *   - 2xx                       -> definitive success, stop.
+ *   - 429                       -> definitive rejection by Circle (nothing was
+ *                                  dispensed) -> safe to try the NEXT key.
+ *   - other 4xx (except 408)    -> definitive rejection (the request reached
+ *                                  Circle and was refused) -> do NOT retry,
+ *                                  report the error.
+ *   - 5xx, 408, transport error -> OUTCOME UNKNOWN: a gateway timeout (502/
+ *                                  504), request timeout (408) or a lost
+ *                                  connection can all happen AFTER Circle
+ *                                  executed the drip. NEVER retried; the
+ *                                  caller keeps locks/reservations and tells
+ *                                  the user to check their wallet.
  * A shared deadline bounds total wall time inside the serverless function
- * budget (maxDuration 10s), so a hanging connection cannot consume the whole
- * allowance on one key.
+ * budget (maxDuration 10s), and every attempt carries its own timeout.
  */
 
 import https from 'https';
@@ -27,11 +30,95 @@ export function setRequesterForTests(fn) {
   injectedRequester = fn;
 }
 
-
 export const DEFAULT_PER_REQUEST_TIMEOUT_MS = 4000;
 export const DEFAULT_TOTAL_DEADLINE_MS = 8500;
 export const MAX_ATTEMPTS = 3;
 const MAX_RESPONSE_BYTES = 512 * 1024;
+
+const CIRCLE_REQUEST_OPTIONS = Object.freeze({
+  hostname: 'api.circle.com',
+  port: 443,
+  path: '/v1/faucet/drips',
+  method: 'POST'
+});
+
+/** Exported for tests (the real TLS transport can be exercised against a
+ *  local server via the `options` parameter; production always defaults to
+ *  the hardcoded Circle endpoint). */
+export async function httpsRequester(apiKey, payload, timeoutMs, options = CIRCLE_REQUEST_OPTIONS) {
+  return new Promise((resolve, reject) => {
+    const postData = JSON.stringify(payload);
+
+    const reqOptions = {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData)
+      }
+    };
+
+    // Absolute deadline so a black-holed socket can never wedge the handler.
+    const timer = setTimeout(() => {
+      req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    if (typeof timer.unref === 'function') timer.unref();
+
+    const settle = (fn, value) => {
+      clearTimeout(timer);
+      fn(value);
+    };
+
+    const req = https.request(reqOptions, (res) => {
+      let data = '';
+      let bytes = 0;
+      let settled = false;
+
+      res.on('data', (chunk) => {
+        if (settled) return;
+        bytes += chunk.length;
+        if (bytes > MAX_RESPONSE_BYTES) {
+          settled = true;
+          // Destroy WITH an error: a bare destroy() mid-response neither ends
+          // nor errors the stream, which would leave the promise unsettled.
+          const err = new Error('Response too large');
+          err.statusCode = res.statusCode;
+          req.destroy(err);
+          return;
+        }
+        data += chunk;
+      });
+
+      res.on('end', () => {
+        if (settled) return;
+        settled = true;
+        try {
+          settle(resolve, { statusCode: res.statusCode, data: JSON.parse(data) });
+        } catch {
+          settle(resolve, {
+            statusCode: res.statusCode,
+            data: { error: 'Invalid JSON response', raw: data.substring(0, 200) }
+          });
+        }
+      });
+
+      res.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        settle(reject, err);
+      });
+    });
+
+    req.on('error', (error) => {
+      // Promise settle is idempotent; this must run even after an overflow
+      // destroy, otherwise the overflow path would never settle.
+      settle(reject, error);
+    });
+
+    req.write(postData);
+    req.end();
+  });
+}
 
 /**
  * Single request to Circle. Resolves {statusCode, data} for any HTTP response;
@@ -46,6 +133,10 @@ export function makeCircleRequest(apiKey, payload, timeoutMs = DEFAULT_PER_REQUE
   return (requester || injectedRequester || httpsRequester)(apiKey, payload, timeoutMs);
 }
 
+function isAmbiguousStatus(statusCode) {
+  return statusCode >= 500 || statusCode === 408;
+}
+
 /**
  * Try to complete a drip with at most `maxAttempts` different keys, advancing
  * the shared round-robin rotation for every attempt.
@@ -55,7 +146,7 @@ export function makeCircleRequest(apiKey, payload, timeoutMs = DEFAULT_PER_REQUE
  *   | {outcome: 'success', response: object, keyIndex: number}
  *   | {outcome: 'exhausted', lastResponse: object|null, keyIndex: number|null}
  *   | {outcome: 'circle_error', response: object, keyIndex: number}
- *   | {outcome: 'unknown', error: Error, keyIndex: number}
+ *   | {outcome: 'unknown', error?: Error, response?: object, statusCode?: number, keyIndex: number}
  * >}
  */
 export async function claimWithFallback(payload, opts) {
@@ -75,6 +166,8 @@ export async function claimWithFallback(payload, opts) {
     // into an instant "exhausted"); retries need real budget left.
     if (attempt > 0 && remaining < 500) break;
 
+    // May throw on KV failure. Nothing has been sent to Circle yet, so the
+    // caller may safely release reservations in that case.
     const { index } = await advanceRotation(keys.length);
     const timeoutMs = Math.min(perRequestTimeoutMs, remaining);
 
@@ -95,7 +188,14 @@ export async function claimWithFallback(payload, opts) {
         continue;
       }
 
-      // Definitive non-429 error: retrying another key cannot help.
+      if (isAmbiguousStatus(response.statusCode)) {
+        // 5xx/408: Circle (or its gateway) may have executed the drip before
+        // failing. Never retry; the caller must keep the wallet lock.
+        console.error(`[FALLBACK] Ambiguous status ${response.statusCode} on key ${index} — treating as unknown`);
+        return { outcome: 'unknown', response, statusCode: response.statusCode, keyIndex: index };
+      }
+
+      // Definitive 4xx rejection: retrying another key cannot help.
       return { outcome: 'circle_error', response, keyIndex: index };
     } catch (error) {
       // Transport error or timeout: OUTCOME UNKNOWN. The drip may already
@@ -107,67 +207,4 @@ export async function claimWithFallback(payload, opts) {
 
   console.error('[FALLBACK] All attempts exhausted');
   return { outcome: 'exhausted', lastResponse, keyIndex: lastIndex };
-}
-
-function httpsRequester(apiKey, payload, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const postData = JSON.stringify(payload);
-
-    const options = {
-      hostname: 'api.circle.com',
-      port: 443,
-      path: '/v1/faucet/drips',
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData)
-      }
-    };
-
-    const req = https.request(options, (res) => {
-      let data = '';
-      let bytes = 0;
-      let overflow = false;
-
-      res.on('data', (chunk) => {
-        bytes += chunk.length;
-        if (bytes > MAX_RESPONSE_BYTES) {
-          overflow = true;
-          req.destroy();
-          return;
-        }
-        data += chunk;
-      });
-
-      res.on('end', () => {
-        if (overflow) {
-          resolve({
-            statusCode: res.statusCode,
-            data: { error: 'Response too large' }
-          });
-          return;
-        }
-        try {
-          resolve({ statusCode: res.statusCode, data: JSON.parse(data) });
-        } catch {
-          resolve({
-            statusCode: res.statusCode,
-            data: { error: 'Invalid JSON response', raw: data.substring(0, 200) }
-          });
-        }
-      });
-    });
-
-    req.on('error', reject);
-
-    // Absolute deadline (socket-level idle timeout is not sufficient).
-    const timer = setTimeout(() => {
-      req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    timer.unref?.();
-
-    req.write(postData);
-    req.end();
-  });
 }

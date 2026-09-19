@@ -1,26 +1,26 @@
 /**
  * POST /api/claim — testnet token claim endpoint.
  *
- * v2.1.1 — security & correctness rewrite. Behavioural contract for clients
- * (paths, status codes, JSON field names) is unchanged. Internal changes:
+ * v2.1.2 — correctness pass over the v2.1.1 rewrite. Behavioural contract
+ * for clients (paths, status codes, JSON field names, including the
+ * `supported` list on unsupported-chain 400s) is unchanged. Guarantees:
  *
- *  - All shared state (wallet locks, IP limits, key rotation, analytics) moved
- *    from in-memory Maps to ATOMIC Vercel KV commands, so limits hold across
- *    serverless instances and cold starts.
- *  - Wallet addresses are validated per chain and canonicalized before they
- *    are hashed into rate-limit identifiers (case/whitespace bypass fixed).
- *  - Chain allowlist check is prototype-safe (Object.hasOwn).
- *  - Password comparison is constant-time.
- *  - The per-wallet 24h lock is ACQUIRED before the Circle call and RELEASED
- *    only on definitive failure — an address is never burned for 24h because
- *    the faucet was out of keys, and a genuinely ambiguous outcome (transport
- *    error after the drip may have been issued) keeps the lock to avoid a
- *    double drip.
- *  - The IP-based 3-claims/24h limit advertised in the UI/docs now exists.
- *  - Retry semantics: only a definitive 429 advances to the next API key;
- *    ambiguous transport failures are never retried.
- *  - The documented IP limit, Circle request timeout and total deadline are
- *    budgeted to stay inside the function's maxDuration.
+ *  - All shared state (wallet locks, IP limits, key rotation, analytics) uses
+ *    ATOMIC Vercel KV commands with a bounded command deadline, so limits
+ *    hold across serverless instances and the handler can never outlive its
+ *    maxDuration waiting on KV.
+ *  - Wallet addresses are validated per chain; a canonical identity form
+ *    keys the rate limits (case/whitespace/short-form bypass fixed) while the
+ *    user's own spelling is sent to Circle.
+ *  - The per-wallet 24h lock and per-IP daily reservation are transactional:
+ *    released on definitive failure (nothing dispensed) AND on any internal
+ *    error that occurs before anything was sent to Circle; kept only for
+ *    genuinely ambiguous outcomes (a drip may exist), so no address is ever
+ *    burned for 24h without cause and no drip can be doubled.
+ *  - Retry semantics: only a definitive 429 advances to the next API key.
+ *    5xx/408/transport failures are "outcome unknown" — never retried.
+ *  - The IP-based 3-claims/24h limit (configurable via IP_DAILY_LIMIT) now
+ *    exists, as the UI has always advertised.
  */
 
 import {
@@ -36,8 +36,10 @@ import {
   checkInfraLimit
 } from './lib/rate-limit.js';
 import {
+  SUPPORTED_CHAINS,
   isSupportedChain,
   canonicalizeAddress,
+  isSha256Hex,
   safeEqualHex,
   sha256Hex,
   isValidCircleKeyFormat
@@ -82,18 +84,9 @@ export default async function handler(req, res) {
       req.headers['x-real-ip'] ||
       'unknown';
 
-    // Infrastructure DoS guard (fail-open, see rate-limit.js)
-    const infraCheck = await checkInfraLimit(clientIp);
-    if (!infraCheck.allowed) {
-      auditLog({ event: 'infra_limit_exceeded', ip: sha256Hex(clientIp).substring(0, 16) });
-      return res.status(429).json({
-        error: 'Too many requests',
-        message: 'Infrastructure rate limit exceeded (100 req/hour). Please try again later.',
-        resetTime: infraCheck.resetTime
-      });
-    }
-
-    // ---- Parse & type-validate request -----------------------------------
+    // ---- Parse & type-validate request (cheap checks first, so junk never
+    //      spends KV commands; the infra guard below covers well-formed
+    //      traffic and platform/WAF layers cover raw floods) ---------------
     const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) || {};
     const {
       address,
@@ -124,7 +117,7 @@ export default async function handler(req, res) {
       return res.status(400).json({
         error: 'Unsupported blockchain',
         message: `Blockchain "${String(blockchain)}" is not supported`,
-        supported: undefined // never reflect internal enumerations blindly
+        supported: SUPPORTED_CHAINS
       });
     }
 
@@ -139,8 +132,8 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Invalid input', message: 'Input too long' });
     }
 
-    const canonicalAddress = canonicalizeAddress(address, blockchain);
-    if (!canonicalAddress) {
+    const canonical = canonicalizeAddress(address, blockchain);
+    if (!canonical) {
       return res.status(400).json({
         error: 'Invalid address',
         message: `The address is not a valid ${blockchain} address`
@@ -154,17 +147,28 @@ export default async function handler(req, res) {
       });
     }
 
+    // Infrastructure DoS guard (fail-open on KV errors, see rate-limit.js)
+    const infraCheck = await checkInfraLimit(clientIp);
+    if (!infraCheck.allowed) {
+      auditLog({ event: 'infra_limit_exceeded', ip: sha256Hex(clientIp).substring(0, 16) });
+      return res.status(429).json({
+        error: 'Too many requests',
+        message: 'Infrastructure rate limit exceeded (100 req/hour). Please try again later.',
+        resetTime: infraCheck.resetTime
+      });
+    }
+
     auditData = {
       ...auditData,
       mode,
       blockchain,
       tokens: { native, usdc, eurc },
-      walletHash: sha256Hex(canonicalAddress).substring(0, 16),
+      walletHash: sha256Hex(canonical.identity).substring(0, 16),
       ipHash: sha256Hex(clientIp).substring(0, 16)
     };
 
-    // ---- Build Circle payload --------------------------------------------
-    const payload = { address: canonicalAddress, blockchain };
+    // ---- Build Circle payload (user's own spelling goes on the wire) -----
+    const payload = { address: canonical.wire, blockchain };
     if (native) payload.native = true;
     if (usdc) payload.usdc = true;
     if (eurc) payload.eurc = true;
@@ -248,9 +252,10 @@ export default async function handler(req, res) {
     }
 
     const expectedHash = (process.env.DEFAULT_PASSWORD_HASH || '').trim();
-    if (!expectedHash) {
-      // Fail closed: no password configured means nobody authenticates.
-      console.error('[ERROR] DEFAULT_PASSWORD_HASH is not configured');
+    if (!expectedHash || !isSha256Hex(expectedHash)) {
+      // Fail closed: unset OR malformed (e.g. the published placeholder) can
+      // never authenticate — and never by echoing the configured string.
+      console.error('[ERROR] DEFAULT_PASSWORD_HASH is missing or not a sha256 hex digest');
       return res.status(503).json({
         error: 'Faucet not configured',
         message: 'Default faucet is not available. Please use your own API key.'
@@ -273,8 +278,8 @@ export default async function handler(req, res) {
       });
     }
 
-    // Reserve the per-IP daily claim (3/24h, atomic INCR) — protects the
-    // shared keys from one client draining them through many wallets.
+    // Reserve the per-IP daily claim (atomic INCR) — protects the shared keys
+    // from one client draining them through many wallets.
     let ipReservation;
     try {
       ipReservation = await reserveIpDailyClaim(clientIp);
@@ -289,8 +294,8 @@ export default async function handler(req, res) {
       auditLog({ ...auditData, event: 'ip_limit_exceeded' });
       return res.status(429).json({
         error: 'IP rate limit exceeded',
-        message: 'This IP already claimed 3 tokens in the last 24 hours',
-        resetTime: new Date(Date.now() + 24 * 60 * 60 * 1000)
+        message: 'This IP already claimed its daily limit of tokens',
+        resetTime: ipReservation.resetTime
       });
     }
 
@@ -298,10 +303,10 @@ export default async function handler(req, res) {
     // concurrent claim per wallet/network wins, across all instances.
     let lockAcquired = false;
     try {
-      lockAcquired = await acquireWalletLock(canonicalAddress, blockchain);
+      lockAcquired = await acquireWalletLock(canonical.identity, blockchain);
     } catch (error) {
       console.error('[ERROR] KV unavailable for wallet lock:', error.message);
-      await releaseIpDailyClaim(clientIp);
+      await releaseIpDailyClaim(clientIp, ipReservation.day);
       return res.status(503).json({
         error: 'Faucet unavailable',
         message: 'The default faucet is temporarily unavailable. Please try again later.'
@@ -309,7 +314,7 @@ export default async function handler(req, res) {
     }
     if (!lockAcquired) {
       auditLog({ ...auditData, event: 'wallet_limit_exceeded' });
-      await releaseIpDailyClaim(clientIp);
+      await releaseIpDailyClaim(clientIp, ipReservation.day);
       return res.status(429).json({
         error: 'Wallet rate limit exceeded',
         message: 'This wallet already claimed tokens on this network in the last 24 hours',
@@ -317,14 +322,24 @@ export default async function handler(req, res) {
       });
     }
 
-    // ---- Call Circle with bounded, ambiguity-safe fallback ----------------
-    const result = await claimWithFallback(payload, { keys: apiKeys });
-    const usedKeyIndex = result.keyIndex;
-
     const releaseReservations = async () => {
-      await releaseWalletLock(canonicalAddress, blockchain);
-      await releaseIpDailyClaim(clientIp);
+      await releaseWalletLock(canonical.identity, blockchain);
+      await releaseIpDailyClaim(clientIp, ipReservation.day);
     };
+
+    // ---- Call Circle with bounded, ambiguity-safe fallback ----------------
+    // If this throws (e.g. a KV failure while advancing rotation) NOTHING has
+    // been sent to Circle — release both reservations so the wallet/IP are
+    // not burned by an infrastructure blip, then let the outer handler 500.
+    let result;
+    try {
+      result = await claimWithFallback(payload, { keys: apiKeys });
+    } catch (error) {
+      await releaseReservations();
+      throw error;
+    }
+
+    const usedKeyIndex = result.keyIndex;
 
     if (result.outcome === 'success') {
       auditData.success = true;
@@ -340,11 +355,19 @@ export default async function handler(req, res) {
     }
 
     if (result.outcome === 'unknown') {
-      // Ambiguous: keep lock + IP reservation (prevents double drip), tell
+      // Ambiguous (transport loss, or Circle 5xx/408 that may have executed
+      // the drip): keep lock + IP reservation (prevents double drip), tell
       // the user to check their wallet instead of blindly retrying.
-      auditLog({ ...auditData, event: 'claim_unknown', error: result.error.message, keyIndex: usedKeyIndex });
+      auditLog({
+        ...auditData,
+        event: 'claim_unknown',
+        error: result.error?.message,
+        statusCode: result.statusCode,
+        keyIndex: usedKeyIndex
+      });
       await updateAnalytics(mode, blockchain, false, usedKeyIndex);
-      return res.status(503).json({
+      const upstreamError = typeof result.statusCode === 'number';
+      return res.status(upstreamError ? 502 : 503).json({
         error: 'Outcome unknown',
         message:
           'The claim request was sent but the response was lost. The claim may or may not have succeeded — check the wallet balance before retrying.'
@@ -364,7 +387,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // circle_error: definitive non-429 rejection from Circle
+    // circle_error: definitive non-429, non-5xx rejection from Circle
     auditLog({
       ...auditData,
       event: 'circle_api_error',

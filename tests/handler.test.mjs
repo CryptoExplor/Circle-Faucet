@@ -33,15 +33,16 @@ beforeEach(() => {
   };
   delete process.env.FAUCET_DISABLED;
   delete process.env.ADMIN_STATS_TOKEN;
+  delete process.env.IP_DAILY_LIMIT;
   setRequesterForTests(async () => ({ statusCode: 200, data: { transactionId: 'tx-ok' } }));
 });
 after(() => {
   process.env = baseEnv;
 });
 
-const claim = (body, headers = {}) => {
+const claim = (body, ip = IP) => {
   const res = mockRes();
-  return handler(mockReq('POST', body, { 'x-forwarded-for': IP, ...headers }), res).then(() => res);
+  return handler(mockReq('POST', body, { 'x-forwarded-for': ip }), res).then(() => res);
 };
 
 // ---------------------------------------------------------------- basic gate
@@ -70,6 +71,15 @@ test('missing fields / unknown chain / no tokens -> 400', async () => {
     400
   );
   assert.equal((await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', mode: 'own-key', apiKey: 'TEST_API_KEY:1:2' })).statusCode, 400);
+});
+
+test('L3: unsupported-chain 400 keeps the documented `supported` field', async () => {
+  const res = await claim({ address: ADDR, blockchain: 'POLYGON-MAINNET', usdc: true, mode: 'own-key', apiKey: 'TEST_API_KEY:1:2' });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.supported.length, 10);
+  assert.ok(res.body.supported.includes('ETH-SEPOLIA'));
+  assert.ok(res.body.supported.includes('APTOS-TESTNET'));
+  assert.ok(res.body.supported.includes('SOL-DEVNET'));
 });
 
 test('prototype pollution via blockchain is rejected with 400', async () => {
@@ -141,6 +151,13 @@ test('default mode: wrong or missing password -> 401/400', async () => {
   assert.equal(res.statusCode, 400);
 });
 
+test('M2: malformed (placeholder) password hash can NEVER authenticate', async () => {
+  process.env.DEFAULT_PASSWORD_HASH = 'your_password_hash_here';
+  const res = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: 'your_password_hash_here' });
+  assert.ok(res.statusCode === 503 || res.statusCode === 401, 'must not be 200');
+  assert.notEqual(res.statusCode, 200);
+});
+
 test('default mode: fail-closed when DEFAULT_PASSWORD_HASH is unset', async () => {
   process.env.DEFAULT_PASSWORD_HASH = '';
   const res = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: 'anything' });
@@ -154,10 +171,11 @@ test('default mode: same wallet double-claim -> 429 even across case variants', 
   assert.match(res.body.error, /Wallet rate limit/);
 });
 
-test('default mode: parallel duplicate claims — exactly ONE succeeds', async () => {
+test('default mode: parallel duplicate claims from DIFFERENT IPs — exactly ONE succeeds', async () => {
+  // unique IP per request so all 8 contend for the WALLET lock (not the IP limit)
   const results = await Promise.all(
-    Array.from({ length: 8 }, () =>
-      claim({ address: ADDR, blockchain: 'ARC-TESTNET', usdc: true, mode: 'default', password: PASSWORD })
+    Array.from({ length: 8 }, (_, i) =>
+      claim({ address: ADDR, blockchain: 'ARC-TESTNET', usdc: true, mode: 'default', password: PASSWORD }, `10.0.0.${i + 1}`)
     )
   );
   const ok = results.filter((r) => r.statusCode === 200);
@@ -185,6 +203,34 @@ test('default mode: definitive failure RELEASES the wallet lock and IP quota', a
   assert.equal(retry.statusCode, 200, 'wallet must not be burned for 24h after a failed claim');
 });
 
+test('M1: Circle 502 is AMBIGUOUS -> 502 response, lock KEPT (no double drip)', async () => {
+  setRequesterForTests(async () => ({ statusCode: 502, data: { error: 'bad gateway' } }));
+  let calls = 0;
+  setRequesterForTests(async () => {
+    calls++;
+    return { statusCode: 502, data: { error: 'bad gateway' } };
+  });
+  const res = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(res.statusCode, 502);
+  assert.equal(res.body.error, 'Outcome unknown');
+  assert.equal(calls, 1);
+
+  // healthy Circle again -> still locked, because the 502 may have executed
+  setRequesterForTests(async () => ({ statusCode: 200, data: { transactionId: 'maybe-dup' } }));
+  const retry = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(retry.statusCode, 429, 'lock retained after 5xx');
+});
+
+test('M1: Circle 400 is DEFINITIVE -> 400 response, lock RELEASED', async () => {
+  setRequesterForTests(async () => ({ statusCode: 400, data: { code: 0, message: 'bad address' } }));
+  const res = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(res.statusCode, 400);
+
+  setRequesterForTests(async () => ({ statusCode: 200, data: { transactionId: 'tx-3' } }));
+  const retry = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(retry.statusCode, 200, '4xx releases the lock');
+});
+
 test('default mode: AMBIGUOUS transport failure KEEPS the lock (double-drip protection)', async () => {
   setRequesterForTests(async () => {
     throw new Error('Request timed out');
@@ -197,6 +243,52 @@ test('default mode: AMBIGUOUS transport failure KEEPS the lock (double-drip prot
   setRequesterForTests(async () => ({ statusCode: 200, data: { transactionId: 'maybe-dup' } }));
   const retry = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
   assert.equal(retry.statusCode, 429, 'lock retained after unknown outcome');
+});
+
+test('H1: KV failure during rotation -> 500, but wallet lock and IP quota are RELEASED', async () => {
+  const base = createFakeKv();
+  const flaky = {
+    get: (k) => base.get(k),
+    set: (k, v, o) => base.set(k, v, o),
+    del: (...k) => base.del(...k),
+    decr: (k) => base.decr(k),
+    expire: (k, s) => base.expire(k, s),
+    hgetall: (k) => base.hgetall(k),
+    hincrby: (k, f, b) => base.hincrby(k, f, b),
+    incr: (k) => {
+      if (k === 'faucet:key_rotation') throw new Error('KV blip during rotation');
+      return base.incr(k);
+    }
+  };
+  setKvClientForTests(flaky);
+
+  const res = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(res.statusCode, 500, 'rotation failure surfaces as 500');
+
+  // the lock and IP reservation must have been released (nothing was sent)
+  setKvClientForTests(createFakeKv());
+  setRequesterForTests(async () => ({ statusCode: 200, data: { transactionId: 'tx-after-blip' } }));
+  const retry = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(retry.statusCode, 200, 'wallet NOT burned by an infrastructure blip');
+
+  // and the IP has all 3 daily slots available again (only 1 used by the retry)
+  const others = ['0x1111111111111111111111111111111111111111', '0x2222222222222222222222222222222222222222'];
+  for (const w of others) {
+    const r = await claim({ address: w, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+    assert.equal(r.statusCode, 200, 'IP quota was returned');
+  }
+});
+
+test('M3: Circle receives the user\u2019s own address spelling (wire form)', async () => {
+  let sentPayload;
+  setRequesterForTests(async (key, payload) => {
+    sentPayload = payload;
+    return { statusCode: 200, data: { transactionId: 'tx' } };
+  });
+  // Aptos address with leading zeros must NOT be re-encoded
+  const aptosAddr = '0x00' + 'ab'.repeat(31);
+  await claim({ address: aptosAddr, blockchain: 'APTOS-TESTNET', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(sentPayload.address, aptosAddr, 'leading zeros preserved on the wire');
 });
 
 test('default mode: 4th claim from one IP in 24h -> 429 (IP limit now exists)', async () => {

@@ -2,6 +2,9 @@
  * GET /api/stats — analytics endpoint.
  *
  * Reads are composed from atomic KV counters (see lib/analytics-kv.js).
+ * A small per-instance cache (STATS_CACHE_MS, default 5s) keeps dashboard
+ * auto-refresh from multiplying KV read commands — a deliberate trade of a
+ * few seconds of staleness for a 10-100x cut in metered Redis reads.
  *
  * `keyUsage`, `currentKeyIndex` and `availableKeys` describe the shared API
  * key pool and are mild reconnaissance info for an attacker. Set
@@ -13,11 +16,25 @@ import { getAnalytics } from './lib/analytics-kv.js';
 import { safeEqual } from './lib/validate.js';
 
 const configError = 'Ensure Vercel KV is properly configured in your project settings.';
+const CACHE_MS_DEFAULT = 5000;
+
+let cache = { at: 0, value: null };
+
+async function getAnalyticsCached(availableKeys) {
+  const ttl = parseInt(process.env.STATS_CACHE_MS, 10);
+  const cacheMs = Number.isInteger(ttl) && ttl >= 0 ? ttl : CACHE_MS_DEFAULT;
+  if (cacheMs > 0 && cache.value && Date.now() - cache.at < cacheMs) {
+    return cache.value;
+  }
+  const value = await getAnalytics(availableKeys);
+  cache = { at: Date.now(), value };
+  return value;
+}
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Admin-Token');
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -33,7 +50,7 @@ export default async function handler(req, res) {
       .filter((k) => k.length > 0);
     const availableKeys = apiKeys.length;
 
-    const analytics = await getAnalytics(availableKeys);
+    const analytics = await getAnalyticsCached(availableKeys);
 
     let { keyUsage, currentKeyIndex } = analytics;
     const adminToken = process.env.ADMIN_STATS_TOKEN;

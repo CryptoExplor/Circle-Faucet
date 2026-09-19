@@ -78,6 +78,24 @@ export function createFakeKv() {
       return { ...e.value };
     },
 
+    /** Command-chaining pipeline, executed in order on exec() (1 "round trip"). */
+    pipeline() {
+      const ops = [];
+      const self = this;
+      const api = {
+        incr: (k) => (ops.push(['incr', k]), api),
+        decr: (k) => (ops.push(['decr', k]), api),
+        set: (k, v, o) => (ops.push(['set', k, v, o]), api),
+        hincrby: (k, f, b) => (ops.push(['hincrby', k, f, b]), api),
+        exec: async () => {
+          const results = [];
+          for (const [cmd, ...args] of ops) results.push(await self[cmd](...args));
+          return results;
+        }
+      };
+      return api;
+    },
+
     /** test helper: simulate clock-driven expiry */
     _ageAll(ms) {
       for (const e of store.values()) {

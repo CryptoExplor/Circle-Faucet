@@ -1,6 +1,6 @@
 {
   "name": "circle-faucet",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "type": "module",
   "description": "Circle Testnet Faucet - Production Ready with Persistent, Atomic Analytics",
   "scripts": {
