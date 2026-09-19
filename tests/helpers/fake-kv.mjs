@@ -22,6 +22,7 @@ export function createFakeKv() {
       const e = store.get(key);
       const exists = alive(e, Date.now());
       if (opts.nx && exists) return null;
+      if (opts.xx && !exists) return null;
       store.set(key, {
         value,
         expiresAt: opts.ex ? Date.now() + opts.ex * 1000 : null

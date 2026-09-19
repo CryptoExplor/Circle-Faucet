@@ -4,10 +4,13 @@ import { setKvClientForTests } from '../api/lib/kv.js';
 import { createFakeKv } from './helpers/fake-kv.mjs';
 import {
   acquireWalletLock,
+  confirmWalletLock,
   releaseWalletLock,
   reserveIpDailyClaim,
   releaseIpDailyClaim,
-  checkInfraLimit
+  checkInfraLimit,
+  WALLET_LOCK_PROVISIONAL_TTL_SECONDS,
+  WALLET_LOCK_CONFIRMED_TTL_SECONDS
 } from '../api/lib/rate-limit.js';
 import { canonicalizeAddress } from '../api/lib/validate.js';
 
@@ -21,8 +24,11 @@ test('wallet lock: exactly ONE of N concurrent claims wins (atomic SET NX)', asy
   const results = await Promise.all(
     Array.from({ length: N }, () => acquireWalletLock('0xabc', 'ETH-SEPOLIA'))
   );
-  assert.equal(results.filter(Boolean).length, 1, 'exactly one acquirer');
-  assert.equal(results.filter((r) => !r).length, N - 1, 'everyone else rejected');
+  assert.equal(results.filter((r) => r.acquired).length, 1, 'exactly one acquirer');
+  assert.equal(results.filter((r) => !r.acquired && !r.ambiguous).length, N - 1, 'everyone else contested');
+  // every acquirer holds a unique token
+  const tokens = results.map((r) => r.token);
+  assert.equal(new Set(tokens).size, N, 'tokens are unique per request');
 });
 
 test('wallet lock: contract — inputs are ALREADY-canonical identities', async () => {
@@ -31,14 +37,67 @@ test('wallet lock: contract — inputs are ALREADY-canonical identities', async 
   const canon = (a) => canonicalizeAddress(a, 'ETH-SEPOLIA');
   const a = await acquireWalletLock(canon('0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B').identity, 'ETH-SEPOLIA');
   const b = await acquireWalletLock(canon('0XAB5801A7D398351B8BE11C439E05C5B3259AEC9B').identity, 'ETH-SEPOLIA');
-  assert.equal(a, true);
-  assert.equal(b, false, 'case variant collapses to same canonical identity');
+  assert.equal(a.acquired, true);
+  assert.equal(b.acquired, false, 'case variant collapses to same canonical identity');
 });
 
-test('wallet lock release allows a second claim', async () => {
-  assert.equal(await acquireWalletLock('0xabc', 'ARC-TESTNET'), true);
-  await releaseWalletLock('0xabc', 'ARC-TESTNET');
-  assert.equal(await acquireWalletLock('0xabc', 'ARC-TESTNET'), true);
+test('N1: acquire is provisional (90s), confirm extends to 24h', async () => {
+  const seen = [];
+  const base = createFakeKv();
+  setKvClientForTests({
+    ...base,
+    set: async (k, v, o) => {
+      if (k.startsWith('faucet:lock:')) seen.push(o);
+      return base.set(k, v, o);
+    }
+  });
+  const l = await acquireWalletLock('0xabc', 'ARC-TESTNET');
+  assert.equal(l.acquired, true);
+  assert.equal(seen[0].ex, WALLET_LOCK_PROVISIONAL_TTL_SECONDS, 'acquire TTL is provisional');
+  assert.equal(await confirmWalletLock('0xabc', 'ARC-TESTNET', l.token), true);
+  assert.equal(seen[1].ex, WALLET_LOCK_CONFIRMED_TTL_SECONDS, 'confirm extends to 24h');
+});
+
+test('N1: timed-out SET that still applied is detected via the token', async () => {
+  const base = createFakeKv();
+  let firstLockSet = true;
+  setKvClientForTests({
+    ...base,
+    set: async (k, v, o) => {
+      if (firstLockSet && k.startsWith('faucet:lock:')) {
+        firstLockSet = false;
+        await base.set(k, v, o); // applies server-side...
+        throw new Error('KV command timed out: set'); // ...response lost
+      }
+      return base.set(k, v, o);
+    }
+  });
+  const l = await acquireWalletLock('0xabc', 'ARC-TESTNET');
+  assert.equal(l.acquired, true, 'ownership recovered via GET token compare');
+  assert.equal(l.ambiguous, true);
+  // owner can release it by token; a stranger's token cannot
+  assert.equal(await releaseWalletLock('0xabc', 'ARC-TESTNET', 'not-my-token'), false);
+  assert.equal(await releaseWalletLock('0xabc', 'ARC-TESTNET', l.token), true);
+});
+
+test('N1: fully-unavailable KV yields ambiguous NOT-acquired, never a 24h orphan source', async () => {
+  setKvClientForTests({
+    get: async () => { throw new Error('KV down'); },
+    set: async () => { throw new Error('KV down'); },
+    del: async () => { throw new Error('KV down'); },
+    incr: async () => { throw new Error('KV down'); }
+  });
+  const l = await acquireWalletLock('0xabc', 'ARC-TESTNET');
+  assert.equal(l.acquired, false);
+  assert.equal(l.ambiguous, true, 'caller must know cleanup is needed');
+});
+
+test('wallet lock release (ownership-checked) allows a second claim', async () => {
+  const l = await acquireWalletLock('0xabc', 'ARC-TESTNET');
+  assert.equal(l.acquired, true);
+  await releaseWalletLock('0xabc', 'ARC-TESTNET', l.token);
+  const again = await acquireWalletLock('0xabc', 'ARC-TESTNET');
+  assert.equal(again.acquired, true);
 });
 
 test('IP daily limit: 4th claim within 24h is blocked, release frees quota', async () => {
@@ -112,4 +171,13 @@ test('H2: fail-open policy runs within the KV command deadline (hanging KV)', as
   assert.equal(r.allowed, true, 'fail-open');
   assert.ok(elapsed < 500, `must not wait on the hanging KV (took ${elapsed}ms)`);
   setKvTimeoutForTests(0); // restore default for other tests
+});
+
+test('N3: IPv4-mapped IPv6 unwrap + case folding (unit)', async () => {
+  const { clientIpBucket } = await import('../api/lib/validate.js');
+  assert.equal(clientIpBucket('::ffff:1.2.3.4'), '1.2.3.4');
+  assert.equal(clientIpBucket('::FFFF:5.6.7.8'), '5.6.7.8');
+  assert.notEqual(clientIpBucket('::ffff:1.2.3.4'), clientIpBucket('::ffff:5.6.7.8'), 'mapped clients must not share a bucket');
+  assert.equal(clientIpBucket('2001:DB8::1'), clientIpBucket('2001:db8::1'), 'case-insensitive');
+  assert.equal(clientIpBucket('2001:db8:1:2:3:4:5:6'), '2001:0db8:0001:0002:/64');
 });

@@ -36,8 +36,9 @@ function startTlsServer(handler) {
 }
 
 before(async () => {
-  // Generate a throwaway self-signed cert with openssl (present on CI/dev
-  // images); tests are skipped cleanly if it is unavailable.
+  // Generate a throwaway self-signed cert with openssl. If openssl is not
+  // available, this before-hook throws and the FILE fails loudly — that is
+  // deliberate (silent skips hid the real-transport coverage).
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'faucet-tls-'));
   const key = path.join(dir, 'key.pem');
   const cert = path.join(dir, 'cert.pem');

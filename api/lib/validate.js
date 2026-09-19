@@ -133,12 +133,15 @@ export function safeEqual(a, b) {
  */
 export function clientIpBucket(ip) {
   if (typeof ip !== 'string' || ip.length === 0) return 'unknown';
-  const trimmed = ip.trim();
-  if (!trimmed.includes(':')) return trimmed; // IPv4 or opaque
-  // Normalize and truncate IPv6 to its /64 prefix. Expand enough of the
-  // compressed form: use the first 4 groups after parsing via a URL-safe trick.
-  const expanded = expandIpv6(trimmed);
-  if (!expanded) return trimmed; // unparseable — use as-is (fail visible)
+  const lowered = ip.trim().toLowerCase();
+  // IPv4-mapped IPv6 (::ffff:a.b.c.d) must be UNWRAPPED to the plain IPv4
+  // identity: the /64 prefix of every mapped address is zeros, so bucketing
+  // the prefix would put the entire dual-stack internet into one quota.
+  const mapped = lowered.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (mapped) return mapped[1];
+  if (!lowered.includes(':')) return lowered; // IPv4 or opaque
+  const expanded = expandIpv6(lowered);
+  if (!expanded) return lowered; // unparseable — use as-is (fail visible)
   return expanded.split(':').slice(0, 4).join(':') + ':/64';
 }
 

@@ -34,6 +34,7 @@ beforeEach(() => {
   delete process.env.FAUCET_DISABLED;
   delete process.env.ADMIN_STATS_TOKEN;
   delete process.env.IP_DAILY_LIMIT;
+  delete process.env.CLAIM_REQUEST_BUDGET_MS;
   setRequesterForTests(async () => ({ statusCode: 200, data: { transactionId: 'tx-ok' } }));
 });
 after(() => {
@@ -307,6 +308,163 @@ test('default mode: no API keys configured -> 503', async () => {
   process.env.CIRCLE_API_KEYS = '';
   const res = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
   assert.equal(res.statusCode, 503);
+});
+
+test('N1 E2E a: timed-out lock SET that APPLIED is owned via token -> claim completes', async () => {
+  const base = createFakeKv();
+  let blipped = false;
+  setKvClientForTests({
+    get: (k) => base.get(k),
+    del: (...k) => base.del(...k),
+    incr: (k) => base.incr(k),
+    decr: (k) => base.decr(k),
+    expire: (k, sec) => base.expire(k, sec),
+    hgetall: (k) => base.hgetall(k),
+    hincrby: (k, f, b) => base.hincrby(k, f, b),
+    set: async (k, v, o) => {
+      if (!blipped && k.startsWith('faucet:lock:')) {
+        blipped = true;
+        await base.set(k, v, o); // SET applies server-side...
+        throw new Error('KV command timed out: set'); // ...response lost
+      }
+      return base.set(k, v, o);
+    }
+  });
+
+  const first = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(first.statusCode, 200, 'token proves ownership; the claim proceeds');
+
+  // The claim succeeded and the lock was confirmed (same store): locked.
+  const dup = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(dup.statusCode, 429, 'confirmed lock holds');
+});
+
+test('N1 E2E b: timed-out lock SET that did NOT apply -> 503, wallet immediately reusable', async () => {
+  const base = createFakeKv();
+  let blipped = false;
+  setKvClientForTests({
+    get: (k) => base.get(k),
+    del: (...k) => base.del(...k),
+    incr: (k) => base.incr(k),
+    decr: (k) => base.decr(k),
+    expire: (k, sec) => base.expire(k, sec),
+    hgetall: (k) => base.hgetall(k),
+    hincrby: (k, f, b) => base.hincrby(k, f, b),
+    set: async (k, v, o) => {
+      if (!blipped && k.startsWith('faucet:lock:')) {
+        blipped = true;
+        throw new Error('KV command timed out: set'); // NOT applied (rejected before store)
+      }
+      return base.set(k, v, o);
+    }
+  });
+
+  const first = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(first.statusCode, 503, 'fail closed, nothing dispensed');
+
+  setKvClientForTests(createFakeKv());
+  const retry = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(retry.statusCode, 200, `wallet must not be orphaned (got ${retry.statusCode})`);
+});
+
+test('N1 E2E c: SET and ownership-GET both fail -> 503, wallet reusable (no orphan source)', async () => {
+  const base = createFakeKv();
+  let setBlipped = false;
+  let getBlipped = false;
+  setKvClientForTests({
+    get: async (k) => {
+      if (!getBlipped && k.startsWith('faucet:lock:')) {
+        getBlipped = true;
+        throw new Error('KV command timed out: get');
+      }
+      return base.get(k);
+    },
+    del: (...k) => base.del(...k),
+    incr: (k) => base.incr(k),
+    decr: (k) => base.decr(k),
+    expire: (k, sec) => base.expire(k, sec),
+    hgetall: (k) => base.hgetall(k),
+    hincrby: (k, f, b) => base.hincrby(k, f, b),
+    set: async (k, v, o) => {
+      if (!setBlipped && k.startsWith('faucet:lock:')) {
+        setBlipped = true;
+        throw new Error('KV command timed out: set'); // not applied
+      }
+      return base.set(k, v, o);
+    }
+  });
+
+  const first = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(first.statusCode, 503, 'fully ambiguous -> fail closed');
+
+  setKvClientForTests(createFakeKv());
+  const retry = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(retry.statusCode, 200, 'no 24h orphan: retry succeeds once KV recovers');
+});
+
+test('N1 E2E: successful claim locks the wallet for 24h (confirm path)', async () => {
+  const res = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(res.statusCode, 200);
+  const dup = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(dup.statusCode, 429, 'confirmed lock holds');
+});
+
+test('N2 E2E: the Circle fallback inherits the REMAINING request budget', async () => {
+  const base = createFakeKv();
+  const slow = {};
+  for (const m of ['get', 'del', 'incr', 'decr', 'expire', 'hgetall', 'hincrby', 'set']) {
+    slow[m] = async (...a) => {
+      await new Promise((r) => setTimeout(r, 250));
+      return base[m](...a);
+    };
+  }
+  setKvClientForTests(slow);
+
+  let seenTimeout;
+  setRequesterForTests(async (key, payload, timeoutMs) => {
+    seenTimeout = timeoutMs;
+    await new Promise((r) => setTimeout(r, Math.min(timeoutMs, 100)));
+    return { statusCode: 200, data: { transactionId: 'tx' } };
+  });
+
+  const start = Date.now();
+  const res = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  const elapsed = Date.now() - start;
+  assert.equal(res.statusCode, 200);
+  // ~5-6 KV commands at 250ms => >=1.25s elapsed before Circle; a FRESH 8.5s
+  // deadline would show 8500. The shared budget must be strictly smaller.
+  assert.ok(seenTimeout < 8500, `fallback must inherit remaining budget (got ${seenTimeout}ms)`);
+  assert.ok(elapsed < 9500, `total must stay under maxDuration (took ${elapsed}ms)`);
+});
+
+test('N2 E2E: exhausted budget bails out BEFORE calling Circle and releases reservations', async () => {
+  process.env.CLAIM_REQUEST_BUDGET_MS = '3500'; // tiny budget for the test
+  const base = createFakeKv();
+  const slow = {};
+  for (const m of ['get', 'del', 'incr', 'decr', 'expire', 'hgetall', 'hincrby', 'set']) {
+    slow[m] = async (...a) => {
+      await new Promise((r) => setTimeout(r, 800));
+      return base[m](...a);
+    };
+  }
+  setKvClientForTests(slow);
+
+  let circleCalls = 0;
+  setRequesterForTests(async () => {
+    circleCalls++;
+    return { statusCode: 200, data: { transactionId: 'tx' } };
+  });
+
+  const res = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(res.statusCode, 503);
+  assert.equal(circleCalls, 0, 'must not start a Circle attempt without budget');
+  assert.match(res.body.error, /unavailable|overloaded/i);
+
+  // Reservations released: with healthy KV the same wallet+IP can claim.
+  delete process.env.CLAIM_REQUEST_BUDGET_MS;
+  setKvClientForTests(createFakeKv());
+  const retry = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(retry.statusCode, 200, 'wallet/IP quota returned after bail-out');
 });
 
 test('default mode: fallback tries the next key on 429 and succeeds', async () => {
