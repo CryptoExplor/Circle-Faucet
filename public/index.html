@@ -384,38 +384,44 @@
 
     function showResult(type, message, details) {
       const resultDiv = document.getElementById('result');
-      
-      if (type === 'success') {
-        resultDiv.className = 'mt-6 p-4 rounded-lg border-2 bg-green-50 border-green-200';
-        resultDiv.innerHTML = `
-          <div class="flex items-start gap-3">
+      const isSuccess = type === 'success';
+
+      resultDiv.className = 'mt-6 p-4 rounded-lg border-2 ' +
+        (isSuccess ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200');
+
+      // Static, trusted icon markup only — all dynamic strings are inserted
+      // via textContent to prevent HTML/script injection.
+      resultDiv.innerHTML = isSuccess
+        ? `<div class="flex items-start gap-3">
             <svg class="text-green-600 flex-shrink-0 mt-1" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
               <polyline points="22 4 12 14.01 9 11.01"></polyline>
             </svg>
-            <div class="flex-1 min-w-0">
-              <p class="font-semibold text-green-900">${message}</p>
-              ${details ? `<p class="mt-2 text-sm text-gray-700 font-mono bg-black bg-opacity-5 p-2 rounded break-all">${details}</p>` : ''}
-            </div>
-          </div>
-        `;
-      } else {
-        resultDiv.className = 'mt-6 p-4 rounded-lg border-2 bg-red-50 border-red-200';
-        resultDiv.innerHTML = `
-          <div class="flex items-start gap-3">
+          </div>`
+        : `<div class="flex items-start gap-3">
             <svg class="text-red-600 flex-shrink-0 mt-1" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="10"></circle>
               <line x1="15" y1="9" x2="9" y2="15"></line>
               <line x1="9" y1="9" x2="15" y2="15"></line>
             </svg>
-            <div class="flex-1 min-w-0">
-              <p class="font-semibold text-red-900">${message}</p>
-              ${details ? `<p class="mt-2 text-sm text-gray-700 font-mono bg-black bg-opacity-5 p-2 rounded break-all">${details}</p>` : ''}
-            </div>
-          </div>
-        `;
+          </div>`;
+
+      const box = document.createElement('div');
+      box.className = 'flex-1 min-w-0';
+
+      const msg = document.createElement('p');
+      msg.className = 'font-semibold ' + (isSuccess ? 'text-green-900' : 'text-red-900');
+      msg.textContent = message; // untrusted (may echo upstream messages)
+      box.appendChild(msg);
+
+      if (details) {
+        const det = document.createElement('p');
+        det.className = 'mt-2 text-sm text-gray-700 font-mono bg-black bg-opacity-5 p-2 rounded break-all';
+        det.textContent = details; // untrusted
+        box.appendChild(det);
       }
-      
+
+      resultDiv.firstElementChild.appendChild(box);
       resultDiv.classList.remove('hidden');
     }
 

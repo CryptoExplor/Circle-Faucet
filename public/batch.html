@@ -320,11 +320,20 @@
       const icons  = { success: '✅', fail: '❌', skip: '⏭️' };
       const div    = document.createElement('div');
       div.className = `flex items-start gap-3 p-3 rounded-lg border-2 ${colors[status] ?? 'bg-gray-50 border-gray-200'} text-sm`;
-      div.innerHTML = `
-        <span class="flex-shrink-0 mt-0.5">${icons[status] ?? '•'}</span>
-        <span class="font-mono flex-1 break-all text-gray-800">${addr}</span>
-        <span class="flex-shrink-0 text-gray-600 text-xs">${label}</span>
-      `;
+
+      const icon = document.createElement('span');
+      icon.className = 'flex-shrink-0 mt-0.5';
+      icon.textContent = icons[status] ?? '•';
+
+      const addrSpan = document.createElement('span');
+      addrSpan.className = 'font-mono flex-1 break-all text-gray-800';
+      addrSpan.textContent = addr; // untrusted user input — never innerHTML
+
+      const labelSpan = document.createElement('span');
+      labelSpan.className = 'flex-shrink-0 text-gray-600 text-xs';
+      labelSpan.textContent = label; // untrusted (upstream messages)
+
+      div.append(icon, addrSpan, labelSpan);
       const list = document.getElementById('resultList');
       list.appendChild(div);
       list.scrollTop = list.scrollHeight;
