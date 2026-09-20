@@ -10,18 +10,23 @@
  *    whole request shares one budget (CLAIM_REQUEST_BUDGET_MS, default 8.5s):
  *    the Circle fallback inherits the REMAINING budget, and if too little is
  *    left to attempt a claim the reservations are released and 503 is
- *    returned before anything is sent. Analytics are awaited only while they
- *    fit the budget, and are fire-and-forget otherwise (they never reject).
- *    Worst-case wall time therefore stays inside the function maxDuration.
+ *    returned before anything is sent. Analytics are awaited only while the
+ *    request is under half its budget and are otherwise DROPPED (they are
+ *    lossy counters and never run after the response). The design target is
+ *    maxDuration 10s for KV latencies up to ~1.3s per command; beyond that,
+ *    requests degrade to fail-closed 503s whose wall time is bounded by the
+ *    per-command deadlines (1.5s) rather than by the budget.
  *  - Wallet addresses are validated per chain; a canonical identity form
  *    keys the rate limits (case/whitespace/short-form bypass fixed) while the
  *    user's own spelling is sent to Circle.
- *  - The per-wallet lock is ownership-tokened with a 90s PROVISIONAL TTL,
- *    confirmed to 24h after a terminal Circle outcome (success or unknown),
- *    and released (compare-and-delete by token) on definitive failure or on
- *    any internal error before anything was sent to Circle. A lock whose
- *    confirmation never happened self-heals in <=90s, so no address is ever
- *    burned for 24h by an infrastructure blip, and no drip can be doubled.
+ *  - The per-wallet lock is ownership-tokened. Acquire sets a 90s
+ *    PROVISIONAL TTL; the 24h TTL is then established WRITE-AHEAD — an
+ *    awaited atomic EXPIRE before anything is sent to Circle (failure there
+ *    fails closed with nothing sent). Because the extension precedes the
+ *    send, ANY post-send freeze, crash or dropped work leaves the
+ *    conservative 24h lock, and there is no lock work after the response.
+ *    Pre-send orphans self-heal in <=90s, definitive failures release by
+ *    token, and no drip can be doubled.
  *  - Retry semantics: only a definitive 429 advances to the next API key.
  *    5xx/408/transport failures are "outcome unknown" — never retried.
  *  - The IP-based 3-claims/24h limit (configurable via IP_DAILY_LIMIT) now
@@ -35,7 +40,7 @@ import {
 import { updateAnalytics } from './lib/analytics-kv.js';
 import {
   acquireWalletLock,
-  confirmWalletLock,
+  extendWalletLock,
   releaseWalletLock,
   reserveIpDailyClaim,
   releaseIpDailyClaim,
@@ -72,34 +77,18 @@ const getRequestBudgetMs = () => {
 const MIN_CIRCLE_ATTEMPT_MS = 1500;
 
 /**
- * Record analytics without endangering the response budget: awaited while
- * there is comfortable headroom, fire-and-forget otherwise (updateAnalytics
- * is designed never to reject).
+ * Record analytics while respecting the response budget. Returns the promise
+ * ONLY while the request is under half its budget — the caller awaits it in
+ * that case. Past that point analytics are DROPPED: they are lossy counters
+ * that must never delay the response and must never run after it (unregistered
+ * post-response work has no execution guarantee on serverless). updateAnalytics
+ * never rejects, so awaiting it is always safe.
  */
 const scheduleAnalytics = (startTime, mode, blockchain, success, keyIndex) => {
-  const promise = updateAnalytics(mode, blockchain, success, keyIndex);
-  if (Date.now() - startTime < getRequestBudgetMs() / 2) {
-    return promise;
+  if (Date.now() - startTime >= getRequestBudgetMs() / 2) {
+    return undefined; // deliberately dropped; see docstring
   }
-  promise.catch(() => {}); // defensive; updateAnalytics already swallows
-  return undefined;
-};
-
-/**
- * Confirm the wallet lock (provisional -> 24h) without endangering the
- * response budget: awaited only while there is comfortable headroom,
- * fire-and-forget otherwise. If the function freezes before a deferred
- * confirm runs, the lock simply remains provisional and self-heals in <=90s
- * (a retry is then backstopped by Circle's own per-address cap — no double
- * dispensation is possible).
- */
-const scheduleConfirm = (startTime, identity, blockchain, token) => {
-  const promise = confirmWalletLock(identity, blockchain, token);
-  if (Date.now() - startTime < getRequestBudgetMs() / 2) {
-    return promise;
-  }
-  promise.catch(() => {}); // confirmWalletLock never rejects, be defensive anyway
-  return undefined;
+  return updateAnalytics(mode, blockchain, success, keyIndex);
 };
 
 export default async function handler(req, res) {
@@ -254,7 +243,7 @@ export default async function handler(req, res) {
       } catch (error) {
         // Ambiguous outcome: the drip may exist. Never auto-retry.
         auditLog({ ...auditData, event: 'claim_unknown', error: error.message });
-        scheduleAnalytics(startTime, mode, blockchain, false, null);
+        await scheduleAnalytics(startTime, mode, blockchain, false, null);
         return res.status(503).json({
           error: 'Outcome unknown',
           message:
@@ -268,7 +257,7 @@ export default async function handler(req, res) {
         auditData.success = true;
         auditData.duration = Date.now() - startTime;
         auditLog({ ...auditData, event: 'claim_success' });
-        scheduleAnalytics(startTime, mode, blockchain, true, null);
+        await scheduleAnalytics(startTime, mode, blockchain, true, null);
         return res.status(200).json({
           success: true,
           message: 'Tokens claimed successfully',
@@ -277,7 +266,7 @@ export default async function handler(req, res) {
         });
       }
 
-      scheduleAnalytics(startTime, mode, blockchain, false, null);
+      await scheduleAnalytics(startTime, mode, blockchain, false, null);
       auditLog({
         ...auditData,
         event: 'circle_api_error',
@@ -347,6 +336,17 @@ export default async function handler(req, res) {
       });
     }
 
+    // N6: bail before taking the lock if the shared budget is already spent.
+    const preLockRemainingMs = getRequestBudgetMs() - (Date.now() - startTime);
+    if (preLockRemainingMs < MIN_CIRCLE_ATTEMPT_MS) {
+      auditLog({ ...auditData, event: 'request_budget_exhausted', preLockRemainingMs });
+      await releaseIpDailyClaim(clientIp, ipReservation.day);
+      return res.status(503).json({
+        error: 'Faucet unavailable',
+        message: 'The faucet is temporarily overloaded. Please try again in a moment.'
+      });
+    }
+
     // Acquire the atomic per-wallet claim lock — exactly one concurrent
     // claim per wallet/network wins, across all instances. The lock carries
     // a unique ownership token and a 90s provisional TTL: an acquire whose
@@ -380,10 +380,36 @@ export default async function handler(req, res) {
       });
     }
 
+    // Bounded parallel cleanup: releases never reject; the cap only bounds
+    // how long a degraded KV can delay the response — anything left behind
+    // self-heals (lock <=90s provisional / counter rolls over with its bucket).
     const releaseReservations = async () => {
-      await releaseWalletLock(canonical.identity, blockchain, lock.token);
-      await releaseIpDailyClaim(clientIp, ipReservation.day);
+      const cleanup = Promise.all([
+        releaseWalletLock(canonical.identity, blockchain, lock.token),
+        releaseIpDailyClaim(clientIp, ipReservation.day)
+      ]);
+      const cap = new Promise((r) => {
+        const t = setTimeout(r, 1600);
+        if (typeof t.unref === 'function') t.unref();
+      });
+      await Promise.race([cleanup, cap]);
     };
+
+    // N5: establish the 24h TTL WRITE-AHEAD. Awaited BEFORE anything is sent
+    // to Circle: if it fails we fail closed with nothing sent, and every
+    // post-send failure mode (freeze, crash, dropped work) then leaves the
+    // conservative 24h lock. If the send is later abandoned on an orderly
+    // error path, releaseReservations removes the lock by token.
+    const extended = await extendWalletLock(canonical.identity, blockchain, lock.token);
+    if (!extended) {
+      console.error('[ERROR] Could not establish the 24h wallet lock (KV failure)');
+      auditLog({ ...auditData, event: 'wallet_lock_extend_failed' });
+      await releaseReservations();
+      return res.status(503).json({
+        error: 'Faucet unavailable',
+        message: 'The default faucet is temporarily unavailable. Please try again later.'
+      });
+    }
 
     // N2: the Circle fallback inherits the REMAINING request budget — a fresh
     // deadline here would let slow-but-alive KV push the total past maxDuration.
@@ -419,9 +445,8 @@ export default async function handler(req, res) {
       auditData.success = true;
       auditData.duration = Date.now() - startTime;
       auditLog({ ...auditData, event: 'claim_success', keyIndex: usedKeyIndex });
-      scheduleAnalytics(startTime, mode, blockchain, true, usedKeyIndex);
-      // Terminal outcome: extend the provisional lock to the full 24h.
-      scheduleConfirm(startTime, canonical.identity, blockchain, lock.token);
+      await scheduleAnalytics(startTime, mode, blockchain, true, usedKeyIndex);
+      // The 24h lock was established write-ahead; success simply keeps it.
       heldLock = null;
       return res.status(200).json({
         success: true,
@@ -442,13 +467,10 @@ export default async function handler(req, res) {
         statusCode: result.statusCode,
         keyIndex: usedKeyIndex
       });
-      scheduleAnalytics(startTime, mode, blockchain, false, usedKeyIndex);
-      // Possibly dispensed: keep the wallet locked (confirm to 24h). If the
-      // confirm fails or is deferred past the budget, the <=90s provisional
-      // expiry plus Circle's own per-address cap still prevent a double
-      // dispensation.
-      scheduleConfirm(startTime, canonical.identity, blockchain, lock.token);
-      heldLock = null; // intentionally KEPT (confirmed to 24h)
+      await scheduleAnalytics(startTime, mode, blockchain, false, usedKeyIndex);
+      // Possibly dispensed: the wallet stays locked — the 24h TTL was already
+      // established write-ahead, so nothing post-send is required to keep it.
+      heldLock = null; // intentionally KEPT (24h from the write-ahead extend)
       const upstreamError = typeof result.statusCode === 'number';
       return res.status(upstreamError ? 502 : 503).json({
         error: 'Outcome unknown',
@@ -460,7 +482,7 @@ export default async function handler(req, res) {
     // Definitive failure (Circle rejected the request): give the wallet and
     // the IP their quota back.
     await releaseReservations();
-    scheduleAnalytics(startTime, mode, blockchain, false, usedKeyIndex);
+    await scheduleAnalytics(startTime, mode, blockchain, false, usedKeyIndex);
 
     if (result.outcome === 'exhausted') {
       auditLog({ ...auditData, event: 'keys_exhausted', statusCode: result.lastResponse?.statusCode });

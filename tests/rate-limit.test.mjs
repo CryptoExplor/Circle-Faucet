@@ -4,13 +4,13 @@ import { setKvClientForTests } from '../api/lib/kv.js';
 import { createFakeKv } from './helpers/fake-kv.mjs';
 import {
   acquireWalletLock,
-  confirmWalletLock,
+  extendWalletLock,
   releaseWalletLock,
   reserveIpDailyClaim,
   releaseIpDailyClaim,
   checkInfraLimit,
   WALLET_LOCK_PROVISIONAL_TTL_SECONDS,
-  WALLET_LOCK_CONFIRMED_TTL_SECONDS
+  WALLET_LOCK_TTL_SECONDS
 } from '../api/lib/rate-limit.js';
 import { canonicalizeAddress } from '../api/lib/validate.js';
 
@@ -41,21 +41,33 @@ test('wallet lock: contract — inputs are ALREADY-canonical identities', async 
   assert.equal(b.acquired, false, 'case variant collapses to same canonical identity');
 });
 
-test('N1: acquire is provisional (90s), confirm extends to 24h', async () => {
-  const seen = [];
+test('N5: extendWalletLock establishes 24h write-ahead and preserves the token', async () => {
   const base = createFakeKv();
+  const ops = [];
   setKvClientForTests({
     ...base,
     set: async (k, v, o) => {
-      if (k.startsWith('faucet:lock:')) seen.push(o);
+      if (k.startsWith('faucet:lock:')) ops.push(['set', o]);
       return base.set(k, v, o);
+    },
+    expire: async (k, sec) => {
+      if (k.startsWith('faucet:lock:')) ops.push(['expire', sec]);
+      return base.expire(k, sec);
     }
   });
   const l = await acquireWalletLock('0xabc', 'ARC-TESTNET');
   assert.equal(l.acquired, true);
-  assert.equal(seen[0].ex, WALLET_LOCK_PROVISIONAL_TTL_SECONDS, 'acquire TTL is provisional');
-  assert.equal(await confirmWalletLock('0xabc', 'ARC-TESTNET', l.token), true);
-  assert.equal(seen[1].ex, WALLET_LOCK_CONFIRMED_TTL_SECONDS, 'confirm extends to 24h');
+  assert.equal(ops[0][1].ex, WALLET_LOCK_PROVISIONAL_TTL_SECONDS, 'acquire TTL is provisional (90s)');
+  assert.equal(await extendWalletLock('0xabc', 'ARC-TESTNET', l.token), true, 'write-ahead extend succeeds');
+  assert.equal(ops[1][1], WALLET_LOCK_TTL_SECONDS, 'extend sets the 24h TTL');
+  // EXPIRE must not touch the value: ownership token survives the extension
+  const entry = [...base._dump().entries()].find(([k]) => k.startsWith('faucet:lock:'));
+  assert.equal(entry[1].value, l.token);
+});
+
+test('N5: extend on a vanished lock returns false (caller fails closed)', async () => {
+  setKvClientForTests(createFakeKv());
+  assert.equal(await extendWalletLock('0xabc', 'ARC-TESTNET', 'tok'), false);
 });
 
 test('N1: timed-out SET that still applied is detected via the token', async () => {

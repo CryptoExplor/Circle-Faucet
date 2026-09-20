@@ -310,6 +310,62 @@ test('default mode: no API keys configured -> 503', async () => {
   assert.equal(res.statusCode, 503);
 });
 
+test('N5: the 24h TTL is already in place AT RESPONSE TIME (no post-send lock work)', async () => {
+  // Freeze-style regression test for round-3 N5: unregistered post-response
+  // work has no execution guarantee on serverless, so the 24h TTL must be
+  // established BEFORE the Circle call — i.e. it must be observable on the
+  // lock key the moment the response is handed back, with nothing left
+  // pending. (This test fails against the round-3 deferred-confirm design,
+  // where the TTL was still 90s at response time.)
+  const base = createFakeKv();
+  setKvClientForTests(base);
+  const res = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(res.statusCode, 200);
+
+  const lockEntry = [...base._dump().entries()].find(([k]) => k.startsWith('faucet:lock:'));
+  assert.ok(lockEntry, 'lock exists');
+  const ttlMs = lockEntry[1].expiresAt - Date.now();
+  assert.ok(
+    ttlMs > 23.9 * 60 * 60 * 1000,
+    `lock TTL at response time must be ~24h, got ${Math.round(ttlMs / 1000)}s`
+  );
+});
+
+test('N5: extend failure fails closed BEFORE anything is sent', async () => {
+  const base = createFakeKv();
+  let extendFailed = false;
+  setKvClientForTests({
+    get: (k) => base.get(k),
+    set: (k, v, o) => base.set(k, v, o),
+    del: (...k) => base.del(...k),
+    incr: (k) => base.incr(k),
+    decr: (k) => base.decr(k),
+    expire: async (k, sec) => {
+      if (k.startsWith('faucet:lock:') && sec === 86400 && !extendFailed) {
+        extendFailed = true;
+        return 0; // key vanished / KV misbehaving at the extension point
+      }
+      return base.expire(k, sec);
+    },
+    hgetall: (k) => base.hgetall(k),
+    hincrby: (k, f, b) => base.hincrby(k, f, b)
+  });
+  let circleCalls = 0;
+  setRequesterForTests(async () => {
+    circleCalls++;
+    return { statusCode: 200, data: { transactionId: 'tx' } };
+  });
+
+  const res = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(res.statusCode, 503, 'extend failure -> fail closed');
+  assert.equal(circleCalls, 0, 'nothing was sent to Circle');
+
+  // KV healthy again: the wallet was released, not burned.
+  setKvClientForTests(createFakeKv());
+  const retry = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(retry.statusCode, 200, 'wallet reusable after extend failure');
+});
+
 test('N1 E2E a: timed-out lock SET that APPLIED is owned via token -> claim completes', async () => {
   const base = createFakeKv();
   let blipped = false;

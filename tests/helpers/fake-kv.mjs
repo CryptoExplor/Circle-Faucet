@@ -87,6 +87,7 @@ export function createFakeKv() {
         incr: (k) => (ops.push(['incr', k]), api),
         decr: (k) => (ops.push(['decr', k]), api),
         set: (k, v, o) => (ops.push(['set', k, v, o]), api),
+        expire: (k, s) => (ops.push(['expire', k, s]), api),
         hincrby: (k, f, b) => (ops.push(['hincrby', k, f, b]), api),
         exec: async () => {
           const results = [];

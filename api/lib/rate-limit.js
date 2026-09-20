@@ -32,7 +32,7 @@ import { getKv } from './kv.js';
 import { sha256Hex, clientIpBucket } from './validate.js';
 
 /**
- * Wallet-lock lifecycle (N1 hardening):
+ * Wallet-lock lifecycle (write-ahead extension):
  *
  * A KV command deadline is a CLIENT-side race — it cannot cancel the command,
  * so a timed-out `SET NX` may still have applied server-side. A blind release
@@ -41,21 +41,21 @@ import { sha256Hex, clientIpBucket } from './validate.js';
  *
  *  1. The lock value is a UNIQUE per-request token. Only the creator knows it,
  *     so GET-compare-then-DEL is a safe ownership-checked release without Lua.
- *  2. The acquire TTL is PROVISIONAL (90s). Any orphaned lock — acquired but
- *     never confirmed because the request died mid-KV-outage — self-heals in
- *     at most 90 seconds. No wallet can be burned for 24h by infrastructure.
- *  3. After Circle gives a TERMINAL outcome (success, or unknown-but-possibly-
- *     dispensed), the holder CONFIRMS the lock, extending it to 24h.
- *  4. Definitive failure releases via token compare-and-delete immediately.
- *
- * Residual risk (documented): if the confirm call itself fails on the
- * "unknown outcome" path, the lock evaporates after <=90s and the wallet may
- * retry; a second drip is then blocked by Circle's own per-address cap
- * (definitive 4xx), so no double dispensation is possible — worst case is a
- * confusing one-off 429/400, never a double claim.
+ *  2. Acquire sets a PROVISIONAL TTL (90s): an orphan created before the
+ *     extension point (ambiguous acquire, pre-POST crash) self-heals in
+ *     <=90 seconds. No wallet is burned for 24h by pre-send infrastructure.
+ *  3. The 24h TTL is established WRITE-AHEAD: before anything is sent to
+ *     Circle, the holder extends the lock with an awaited EXPIRE (one atomic
+ *     command that preserves the ownership token as the value). If the
+ *     extension fails, the request fails closed (release + 503) — nothing
+ *     has been sent, so nothing is owed.
+ *  4. Because the extension happens BEFORE the send, any freeze, crash or
+ *     dropped post-response work AFTER the send leaves the CONSERVATIVE
+ *     24h lock. There is no lock-related work after the response at all.
+ *  5. Definitive failure releases via token compare-and-delete immediately.
  */
 export const WALLET_LOCK_PROVISIONAL_TTL_SECONDS = 90;
-export const WALLET_LOCK_CONFIRMED_TTL_SECONDS = 24 * 60 * 60;
+export const WALLET_LOCK_TTL_SECONDS = 24 * 60 * 60;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -80,11 +80,19 @@ export async function checkInfraLimit(ip, opts = {}) {
     const kv = await getKv();
     const bucket = Math.floor(now / HOUR_MS);
     const key = `faucet:rl:infra:${sha256Hex(clientIpBucket(ip)).slice(0, 24)}:${bucket}`;
-    const count = await kv.incr(key);
-    if (count === 1) {
-      // Best-effort: the bucket id in the key already makes old windows
-      // unreadable, so a failed EXPIRE only leaves garbage, not locks.
-      await kv.expire(key, 2 * 60 * 60).catch(() => {});
+    // One round trip: INCR + EXPIRE. Unconditional EXPIRE is safe — the
+    // bucket id in the key makes old windows unreadable regardless of TTL,
+    // so extending a bucket's garbage lifetime has no correctness effect.
+    let count;
+    if (typeof kv.pipeline === 'function') {
+      const p = kv.pipeline();
+      p.incr(key);
+      p.expire(key, 2 * HOUR_MS / 1000);
+      const [incrResult] = await p.exec();
+      count = incrResult;
+    } else {
+      count = await kv.incr(key);
+      await kv.expire(key, 2 * HOUR_MS / 1000).catch(() => {});
     }
     if (count > ipInfraLimit()) {
       return { allowed: false, resetTime: new Date((bucket + 1) * HOUR_MS) };
@@ -111,8 +119,15 @@ export async function reserveIpDailyClaim(ip, opts = {}) {
   const kv = await getKv();
   const day = Math.floor(now / DAY_MS);
   const key = `faucet:rl:ipday:${sha256Hex(clientIpBucket(ip)).slice(0, 24)}:${day}`;
-  const count = await kv.incr(key);
-  if (count === 1) {
+  let count;
+  if (typeof kv.pipeline === 'function') {
+    const p = kv.pipeline();
+    p.incr(key);
+    p.expire(key, 2 * 24 * 60 * 60);
+    const [incrResult] = await p.exec();
+    count = incrResult;
+  } else {
+    count = await kv.incr(key);
     await kv.expire(key, 2 * 24 * 60 * 60).catch(() => {});
   }
   if (count > limit) {
@@ -203,26 +218,25 @@ export async function acquireWalletLock(identity, blockchain, opts = {}) {
 }
 
 /**
- * Confirm a held wallet lock after a terminal Circle outcome, extending it
- * from the provisional TTL to the full 24h. Ownership-checked: only succeeds
- * if the stored value still equals our token. Never throws; if this fails the
- * lock self-heals (expires) within the provisional window.
+ * Extend a held wallet lock to the full 24h — WRITE-AHEAD, i.e. this MUST be
+ * awaited before the Circle request is sent. Uses a single atomic EXPIRE,
+ * which changes only the TTL and preserves the ownership token stored as the
+ * value. Returns false (never throws) if KV failed or the key vanished; the
+ * caller must then fail closed (release + 503) because nothing has been sent.
  * @param {string} identity
  * @param {string} blockchain
  * @param {string} token token returned by acquireWalletLock
- * @returns {Promise<boolean>} true if the lock was confirmed
+ * @returns {Promise<boolean>} true if the lock now holds the 24h TTL
  */
-export async function confirmWalletLock(identity, blockchain, token) {
+export async function extendWalletLock(identity, blockchain, token) {
   if (typeof token !== 'string' || token.length === 0) return false;
   try {
     const kv = await getKv();
     const key = walletLockKey(identity, blockchain);
-    const current = await kv.get(key);
-    if (current !== token) return false; // expired or taken over: nothing to confirm
-    await kv.set(key, token, { xx: true, ex: WALLET_LOCK_CONFIRMED_TTL_SECONDS });
-    return true;
+    const result = await kv.expire(key, WALLET_LOCK_TTL_SECONDS);
+    return result === 1;
   } catch (error) {
-    console.error('[RATE_LIMIT] failed to confirm wallet lock (self-heals in <=90s):', error.message);
+    console.error('[RATE_LIMIT] failed to extend wallet lock to 24h:', error.message);
     return false;
   }
 }
