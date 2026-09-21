@@ -1,13 +1,13 @@
 {
   "name": "circle-faucet",
-  "version": "2.1.0",
+  "version": "2.1.2",
   "type": "module",
-  "description": "Circle Testnet Faucet - Production Ready with Persistent Analytics",
+  "description": "Circle Testnet Faucet - Production Ready with Persistent, Atomic Analytics",
   "scripts": {
     "dev": "vercel dev",
     "build": "echo 'No build step required - using ESM React'",
     "deploy": "vercel --prod",
-    "test": "echo 'No tests configured yet'"
+    "test": "node --test tests/*.test.mjs"
   },
   "engines": {
     "node": ">=18.0.0"

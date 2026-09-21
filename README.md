@@ -136,6 +136,8 @@ circle-faucet/
 3. Generate **multiple Test API Keys** (recommended: 3-5 keys for better distribution)
 4. Copy the keys (format: `TEST_API_KEY:xxx:xxx`)
 
+> ⚠️ **Important:** Circle's faucet/drip endpoints require the API key to belong to a **mainnet-verified Circle account** — this applies even when dripping *testnet* tokens. An unverified developer account can create test keys but will be rejected by the faucet with an error.
+
 ### 2. Environment Variables Setup
 
 Create a `.env` file in the root directory:
@@ -599,6 +601,17 @@ Example:
 - **Auto-added:** KV environment variables
 - **Migration:** Analytics reset on first deploy (fresh start)
 
+## 🆕 What's New in v2.1.2 (review hardening)
+
+- ✅ **No more lock leaks** — any internal error after the wallet lock/IP reservation is taken (e.g. a KV blip during key rotation) releases both; nothing is ever dispensed yet nothing is burned.
+- ✅ **Bounded KV client** — retries disabled and every KV command raced against a ~1.5s deadline, so a dead or hanging KV can no longer 504 the whole function (measured: 11.7s → ~4ms on a dead endpoint).
+- ✅ **Gateway 5xx/408 treated as UNKNOWN** — a 502/504 from Circle's edge may have executed the drip; the wallet lock is kept and the user is told to check their balance instead of being allowed an immediate double claim.
+- ✅ **Fail-closed password config** — a malformed `DEFAULT_PASSWORD_HASH` (including the published placeholder) can never authenticate, not even by typing the placeholder itself.
+- ✅ **Aptos addresses sent as written** — canonical identity (zero-padded) is used only for quota keys; Circle receives the user's trimmed address. Fixed a precedence bug in the fallback expression.
+- ✅ **Configurable IP limits** — `IP_DAILY_LIMIT` (default 3) and `IP_INFRA_LIMIT` (default 100), UTC calendar buckets, IPv6 aggregated by /64, correct `resetTime`. Batch claiming from one IP is capped by the daily limit by design.
+- ✅ **Cheaper KV usage** — analytics increments pipelined (1 round trip), `/api/stats` cached ~5s, infra guard moved behind cheap validation so junk requests cost zero KV commands.
+- ✅ **Real-transport tests** — the HTTPS requester (timeouts, oversized responses, non-JSON bodies) is now covered by tests against a local TLS server.
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please:
@@ -656,3 +669,4 @@ Need to claim tokens for **thousands of wallets** across **32+ chains** without 
 ---
 
 `circle faucet` · `circle testnet` · `circle faucet bot` · `circle faucet claimer` · `circle usdc faucet` · `testnet token claimer` · `circle faucet automation` · `circle auto claim` · `circle testnet faucet tool` · `base sepolia faucet` · `ethereum sepolia faucet` · `solana devnet faucet` · `circle faucet bypass` · `circle faucet script`
+

@@ -170,18 +170,37 @@
         }
 
         function createBarChart(label, value, maxValue, color) {
+            // Built with DOM APIs so labels (which include server-derived
+            // network/key names) can never inject HTML.
+            const safeColor = ['purple', 'indigo', 'blue', 'green'].includes(color) ? color : 'gray';
             const percentage = maxValue > 0 ? (value / maxValue) * 100 : 0;
-            return `
-                <div class="mb-4">
-                    <div class="flex justify-between mb-2">
-                        <span class="font-semibold text-gray-700">${label}</span>
-                        <span class="font-bold text-${color}-600">${value}</span>
-                    </div>
-                    <div class="w-full bg-gray-200 rounded-full h-3">
-                        <div class="bg-${color}-600 h-3 rounded-full transition-all duration-500" style="width: ${percentage}%"></div>
-                    </div>
-                </div>
-            `;
+
+            const wrap = document.createElement('div');
+            wrap.className = 'mb-4';
+
+            const row = document.createElement('div');
+            row.className = 'flex justify-between mb-2';
+
+            const labelEl = document.createElement('span');
+            labelEl.className = 'font-semibold text-gray-700';
+            labelEl.textContent = label;
+
+            const valueEl = document.createElement('span');
+            valueEl.className = `font-bold text-${safeColor}-600`;
+            valueEl.textContent = value;
+
+            row.append(labelEl, valueEl);
+
+            const track = document.createElement('div');
+            track.className = 'w-full bg-gray-200 rounded-full h-3';
+
+            const bar = document.createElement('div');
+            bar.className = `bg-${safeColor}-600 h-3 rounded-full transition-all duration-500`;
+            bar.style.width = percentage + '%';
+
+            track.appendChild(bar);
+            wrap.append(row, track);
+            return wrap;
         }
 
         function renderAnalytics(data) {
@@ -195,23 +214,32 @@
             // Update API keys status
             document.getElementById('availableKeys').textContent = data.availableKeys;
             document.getElementById('currentKeyIndex').textContent = data.currentKeyIndex;
-            document.getElementById('nextKeyIndex').textContent = (data.currentKeyIndex + 1) % data.availableKeys;
+            const nextIdx = data.availableKeys > 0
+                ? (data.currentKeyIndex + 1) % data.availableKeys
+                : '—';
+            document.getElementById('nextKeyIndex').textContent = nextIdx;
             
             // Mode distribution
             const modeTotal = (data.claimsByMode['own-key'] || 0) + (data.claimsByMode['default'] || 0);
-            const modeChartHtml = `
-                ${createBarChart('Own API Key', data.claimsByMode['own-key'] || 0, modeTotal, 'purple')}
-                ${createBarChart('Default Faucet', data.claimsByMode['default'] || 0, modeTotal, 'indigo')}
-            `;
-            document.getElementById('modeChart').innerHTML = modeChartHtml;
+            const modeChart = document.getElementById('modeChart');
+            modeChart.replaceChildren(
+                createBarChart('Own API Key', data.claimsByMode['own-key'] || 0, modeTotal, 'purple'),
+                createBarChart('Default Faucet', data.claimsByMode['default'] || 0, modeTotal, 'indigo')
+            );
             
             // Network distribution
             const networks = Object.entries(data.claimsByNetwork || {}).sort((a, b) => b[1] - a[1]);
             const maxNetwork = networks.length > 0 ? networks[0][1] : 1;
-            const networkChartHtml = networks.map(([network, count]) => 
-                createBarChart(network, count, maxNetwork, 'blue')
-            ).join('');
-            document.getElementById('networkChart').innerHTML = networkChartHtml || '<p class="text-gray-500 text-center py-8">No network data yet</p>';
+            const networkChart = document.getElementById('networkChart');
+            if (networks.length === 0) {
+                networkChart.replaceChildren();
+                networkChart.innerHTML = '<p class="text-gray-500 text-center py-8">No network data yet</p>';
+            } else {
+                networkChart.innerHTML = '';
+                networkChart.append(...networks.map(([network, count]) =>
+                    createBarChart(network, count, maxNetwork, 'blue')
+                ));
+            }
             
             // Key usage distribution
             const keyUsage = Object.entries(data.keyUsage || {}).sort((a, b) => {
@@ -220,10 +248,15 @@
                 return numA - numB;
             });
             const maxKeyUsage = keyUsage.length > 0 ? Math.max(...keyUsage.map(k => k[1])) : 1;
-            const keyUsageHtml = keyUsage.map(([key, count]) => 
-                createBarChart(`API Key #${key.split('_')[1]}`, count, maxKeyUsage, 'green')
-            ).join('');
-            document.getElementById('keyUsageDistribution').innerHTML = keyUsageHtml || '<p class="text-gray-500 text-center py-8">No key usage data yet</p>';
+            const keyUsageEl = document.getElementById('keyUsageDistribution');
+            if (keyUsage.length === 0) {
+                keyUsageEl.innerHTML = '<p class="text-gray-500 text-center py-8">No key usage data yet</p>';
+            } else {
+                keyUsageEl.innerHTML = '';
+                keyUsageEl.append(...keyUsage.map(([key, count]) =>
+                    createBarChart('API Key #' + key.split('_')[1], count, maxKeyUsage, 'green')
+                ));
+            }
             
             // Update last updated time
             document.getElementById('lastUpdated').textContent = `Last updated: ${new Date().toLocaleTimeString()}`;

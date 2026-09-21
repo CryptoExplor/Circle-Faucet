@@ -1,245 +1,107 @@
-import https from 'https';
-import crypto from 'crypto';
-import { updateAnalytics, setCurrentKeyIndex, getCurrentKeyIndex } from './lib/analytics-kv.js';
-
 /**
- * RATE LIMITING STRATEGY
- * 
- * BYO API Key Mode:
- * - NO rate limiting from our side
- * - Circle enforces their own limits (5-10 claims/day, varies)
- * 
- * Default Faucet Mode:
- * - Wallet-based: 1 claim per network per 24h
- * - Round-robin key rotation with automatic fallback
- * - Infrastructure DoS protection (100 req/hour per IP)
+ * POST /api/claim — testnet token claim endpoint.
+ *
+ * v2.1.2 — correctness pass over the v2.1.1 rewrite. Behavioural contract
+ * for clients (paths, status codes, JSON field names, including the
+ * `supported` list on unsupported-chain 400s) is unchanged. Guarantees:
+ *
+ *  - All shared state (wallet locks, IP limits, key rotation, analytics) uses
+ *    ATOMIC Vercel KV commands. Every KV command is deadline-bounded and the
+ *    whole request shares one budget (CLAIM_REQUEST_BUDGET_MS, default 8s):
+ *    the Circle fallback inherits the REMAINING budget, and if too little is
+ *    left to attempt a claim the reservations are released and 503 is
+ *    returned before anything is sent. Analytics are awaited only while the
+ *    request is under half its budget and are otherwise DROPPED (they are
+ *    lossy counters and never run after the response). The design target is
+ *    maxDuration 10s for KV latencies up to ~1.3s per command; beyond that,
+ *    requests degrade to fail-closed 503s whose wall time is bounded by the
+ *    per-command deadlines (1.5s) rather than by the budget. A failed
+ *    release during a KV brownout CAN leave the conservative 24h lock: the
+ *    release is retried and audited with the exact Redis key, and
+ *    scripts/clear-lock.mjs removes it manually.
+ *  - Wallet addresses are validated per chain; a canonical identity form
+ *    keys the rate limits (case/whitespace/short-form bypass fixed) while the
+ *    user's own spelling is sent to Circle.
+ *  - The per-wallet lock is ownership-tokened. Acquire sets a 90s
+ *    PROVISIONAL TTL; the 24h TTL is then established WRITE-AHEAD — an
+ *    awaited atomic EXPIRE before anything is sent to Circle (failure there
+ *    fails closed with nothing sent). Because the extension precedes the
+ *    send, ANY post-send freeze, crash or dropped work leaves the
+ *    conservative 24h lock, and there is no lock work after the response.
+ *    Pre-send orphans self-heal in <=90s, definitive failures release by
+ *    token, and no drip can be doubled.
+ *  - Retry semantics: only a definitive 429 advances to the next API key.
+ *    5xx/408/transport failures are "outcome unknown" — never retried.
+ *  - The IP-based 3-claims/24h limit (configurable via IP_DAILY_LIMIT) now
+ *    exists, as the UI has always advertised.
  */
 
-// Environment variables
-const DEFAULT_PASSWORD_HASH = process.env.DEFAULT_PASSWORD_HASH || '';
-const CIRCLE_API_KEYS = process.env.CIRCLE_API_KEYS || '';
-const FAUCET_DISABLED = process.env.FAUCET_DISABLED === 'true';
-const REVOKED_KEY_HASHES = (process.env.REVOKED_API_KEY_HASHES || '').split(',').filter(Boolean);
-
-// Supported chains
-const SUPPORTED_CHAINS = {
-  'ARC-TESTNET': 'ARC-TESTNET',
-  'ETH-SEPOLIA': 'ETH-SEPOLIA',
-  'AVAX-FUJI': 'AVAX-FUJI',
-  'MATIC-AMOY': 'MATIC-AMOY',
-  'SOL-DEVNET': 'SOL-DEVNET',
-  'ARB-SEPOLIA': 'ARB-SEPOLIA',
-  'UNI-SEPOLIA': 'UNI-SEPOLIA',
-  'BASE-SEPOLIA': 'BASE-SEPOLIA',
-  'OP-SEPOLIA': 'OP-SEPOLIA',
-  'APTOS-TESTNET': 'APTOS-TESTNET'
-};
-
-const getApiKeys = () => {
-  if (!CIRCLE_API_KEYS) return [];
-  return CIRCLE_API_KEYS.split(',').map(k => k.trim()).filter(k => k.length > 0);
-};
-
-const getNextApiKey = async () => {
-  const apiKeys = getApiKeys();
-  if (apiKeys.length === 0) return null;
-  
-  // Get current index from KV
-  const currentIndex = await getCurrentKeyIndex();
-  
-  // Get current key
-  const key = apiKeys[currentIndex];
-  
-  // Calculate next index
-  const nextIndex = (currentIndex + 1) % apiKeys.length;
-  
-  // Update index in KV
-  await setCurrentKeyIndex(nextIndex);
-  
-  console.log(`[KEY_ROTATION] Using key ${currentIndex} of ${apiKeys.length}, next will be ${nextIndex}`);
-  
-  return { key, index: currentIndex };
-};
-
-const hashPassword = (password) => {
-  return crypto.createHash('sha256').update(password).digest('hex');
-};
-
-const validateApiKey = (key) => {
-  if (!key || typeof key !== 'string') return false;
-  const parts = key.split(':');
-  return parts.length === 3 && parts[0] === 'TEST_API_KEY';
-};
-
-const hashApiKey = (key) => {
-  return crypto.createHash('sha256').update(key).digest('hex');
-};
-
-// Rate limiting stores
-const requestCountStore = new Map();
-const rateLimitStore = new Map();
-
-const checkRateLimit = (identifier, limit, windowMs) => {
-  const now = Date.now();
-  const windowStart = now - windowMs;
-  
-  const timestamps = (rateLimitStore.get(identifier) || []).filter(t => t > windowStart);
-  rateLimitStore.set(identifier, timestamps);
-  
-  if (timestamps.length >= limit) {
-    return {
-      allowed: false,
-      remaining: 0,
-      resetTime: new Date(timestamps[0] + windowMs)
-    };
-  }
-  
-  return {
-    allowed: true,
-    remaining: limit - timestamps.length - 1
-  };
-};
-
-const recordRateLimit = (identifier) => {
-  const timestamps = rateLimitStore.get(identifier) || [];
-  timestamps.push(Date.now());
-  rateLimitStore.set(identifier, timestamps);
-};
-
-const checkInfraLimit = (ip) => {
-  const now = Date.now();
-  const windowStart = now - (60 * 60 * 1000);
-  
-  const requests = (requestCountStore.get(ip) || []).filter(t => t > windowStart);
-  requestCountStore.set(ip, requests);
-  
-  if (requests.length >= 100) {
-    return { allowed: false, resetTime: new Date(requests[0] + (60 * 60 * 1000)) };
-  }
-  
-  requests.push(now);
-  requestCountStore.set(ip, requests);
-  return { allowed: true };
-};
+import {
+  makeCircleRequest,
+  claimWithFallback
+} from './lib/circle.js';
+import { updateAnalytics } from './lib/analytics-kv.js';
+import {
+  acquireWalletLock,
+  extendWalletLock,
+  releaseWalletLock,
+  reserveIpDailyClaim,
+  releaseIpDailyClaim,
+  checkInfraLimit,
+  walletLockKey
+} from './lib/rate-limit.js';
+import {
+  SUPPORTED_CHAINS,
+  isSupportedChain,
+  canonicalizeAddress,
+  isSha256Hex,
+  safeEqualHex,
+  sha256Hex,
+  isValidCircleKeyFormat
+} from './lib/validate.js';
 
 const auditLog = (event) => {
-  console.log('[AUDIT]', JSON.stringify({
-    timestamp: new Date().toISOString(),
-    ...event
-  }));
+  console.log('[AUDIT]', JSON.stringify({ timestamp: new Date().toISOString(), ...event }));
 };
 
-const makeCircleRequest = (apiKey, payload) => {
-  return new Promise((resolve, reject) => {
-    const postData = JSON.stringify(payload);
-    
-    const options = {
-      hostname: 'api.circle.com',
-      port: 443,
-      path: '/v1/faucet/drips',
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData)
-      },
-      timeout: 10000
-    };
-    
-    const req = https.request(options, (res) => {
-      let data = '';
-      
-      res.on('data', (chunk) => {
-        data += chunk;
-      });
-      
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(data);
-          resolve({
-            statusCode: res.statusCode,
-            data: parsed
-          });
-        } catch (e) {
-          resolve({
-            statusCode: res.statusCode,
-            data: { error: 'Invalid JSON response', raw: data.substring(0, 200) }
-          });
-        }
-      });
-    });
-    
-    req.on('error', (error) => {
-      reject(error);
-    });
-    
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('Request timeout'));
-    });
-    
-    req.write(postData);
-    req.end();
-  });
-};
+const getApiKeys = () =>
+  (process.env.CIRCLE_API_KEYS || '')
+    .split(',')
+    .map((k) => k.trim())
+    .filter((k) => k.length > 0);
 
-// Automatic fallback mechanism
-const makeCircleRequestWithFallback = async (payload) => {
-  const apiKeys = getApiKeys();
-  const maxRetries = apiKeys.length;
-  let lastError = null;
-  
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const result = await getNextApiKey();
-    
-    if (!result || !result.key) {
-      throw new Error('No API keys available');
-    }
-    
-    const { key: apiKey, index: keyIndex } = result;
-    
-    try {
-      console.log(`[FALLBACK] Attempt ${attempt + 1}/${maxRetries} with key index ${keyIndex}`);
-      const response = await makeCircleRequest(apiKey, payload);
-      
-      // If successful, return immediately
-      if (response.statusCode >= 200 && response.statusCode < 300) {
-        console.log(`[FALLBACK] Success with key index ${keyIndex}`);
-        return { response, keyIndex };
-      }
-      
-      // If rate limited (429) or quota exceeded, try next key
-      if (response.statusCode === 429 || response.data?.code === 5) {
-        console.log(`[FALLBACK] Key ${keyIndex} exhausted (${response.statusCode}), trying next key...`);
-        lastError = response;
-        continue;
-      }
-      
-      // For other errors, return immediately (don't retry)
-      return { response, keyIndex };
-      
-    } catch (error) {
-      console.error(`[FALLBACK] Error with key ${keyIndex}:`, error.message);
-      lastError = { statusCode: 500, data: { error: error.message } };
-      
-      // If it's the last attempt, throw the error
-      if (attempt === maxRetries - 1) {
-        throw error;
-      }
-    }
+// Whole-request wall-time budget. The function runs with maxDuration 10s;
+// leave headroom for serialization and the platform itself. Read per request
+// so ops/tests can tune it without reloading the module.
+const getRequestBudgetMs = () => {
+  const n = parseInt(process.env.CLAIM_REQUEST_BUDGET_MS, 10);
+  return Number.isInteger(n) && n >= 3000 && n <= 30000 ? n : 8000;
+};
+// Below this there is no point starting a Circle attempt.
+const MIN_CIRCLE_ATTEMPT_MS = 1500;
+
+/**
+ * Record analytics while respecting the response budget. Returns the promise
+ * ONLY while the request is under half its budget — the caller awaits it in
+ * that case. Past that point analytics are DROPPED: they are lossy counters
+ * that must never delay the response and must never run after it (unregistered
+ * post-response work has no execution guarantee on serverless). updateAnalytics
+ * never rejects, so awaiting it is always safe.
+ */
+const scheduleAnalytics = (startTime, mode, blockchain, success, keyIndex) => {
+  if (Date.now() - startTime >= getRequestBudgetMs() / 2) {
+    return undefined; // deliberately dropped; see docstring
   }
-  
-  // All keys failed
-  console.error('[FALLBACK] All API keys exhausted or failed');
-  return { response: lastError || { statusCode: 503, data: { error: 'All API keys exhausted' } }, keyIndex: null };
+  return updateAnalytics(mode, blockchain, success, keyIndex);
 };
 
 export default async function handler(req, res) {
   const startTime = Date.now();
   let auditData = { mode: null, success: false };
-  
+  let heldLock = null; // { identity, blockchain, token } while we own the lock
+
   try {
-    // CORS headers
+    // CORS (mirrors vercel.json; no credentials, no wildcard+credentials combo)
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -247,75 +109,93 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') {
       return res.status(200).end();
     }
-
     if (req.method !== 'POST') {
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    if (FAUCET_DISABLED) {
-      return res.status(503).json({ 
+    if (process.env.FAUCET_DISABLED === 'true') {
+      return res.status(503).json({
         error: 'Faucet temporarily disabled',
         message: 'The faucet is currently under maintenance. Please try again later.'
       });
     }
 
-    // Get client IP
-    const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || 
-                     req.headers['x-real-ip'] || 
-                     'unknown';
-    
-    // Infrastructure DoS protection
-    const infraCheck = checkInfraLimit(clientIp);
-    if (!infraCheck.allowed) {
-      auditLog({
-        event: 'infra_limit_exceeded',
-        ip: crypto.createHash('sha256').update(clientIp).digest('hex').substring(0, 16),
-      });
-      
-      return res.status(429).json({
-        error: 'Too many requests',
-        message: 'Infrastructure rate limit exceeded (100 req/hour). Please try again later.',
-        resetTime: infraCheck.resetTime
-      });
-    }
+    const clientIp =
+      req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+      req.headers['x-real-ip'] ||
+      'unknown';
 
-    // Parse and validate request body
-    let { address, blockchain, native, usdc, eurc, apiKey, password, mode } = req.body || {};
+    // ---- Parse & type-validate request (cheap checks first, so junk never
+    //      spends KV commands; the infra guard below covers well-formed
+    //      traffic and platform/WAF layers cover raw floods) ---------------
+    const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) || {};
+    const {
+      address,
+      blockchain,
+      native,
+      usdc,
+      eurc,
+      apiKey,
+      password,
+      mode
+    } = body;
 
-    // Log request (without sensitive data)
-    console.log('[REQUEST]', { 
-      address: address?.substring(0, 10) + '...', 
-      blockchain, 
+    console.log('[REQUEST]', {
+      address: typeof address === 'string' ? address.substring(0, 10) + '...' : undefined,
+      blockchain,
       mode,
       tokens: { native, usdc, eurc }
     });
 
-    // Remove sensitive data from logging
-    if (apiKey) {
-      const keyHash = hashApiKey(apiKey);
-      auditData.apiKeyHash = keyHash.substring(0, 16);
-    }
-
-    // Basic validation
     if (!address || !blockchain) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Missing required fields',
         message: 'Address and blockchain are required'
       });
     }
 
-    if (!SUPPORTED_CHAINS[blockchain]) {
+    if (!isSupportedChain(blockchain)) {
       return res.status(400).json({
         error: 'Unsupported blockchain',
-        message: `Blockchain "${blockchain}" is not supported`,
-        supported: Object.keys(SUPPORTED_CHAINS)
+        message: `Blockchain "${String(blockchain)}" is not supported`,
+        supported: SUPPORTED_CHAINS
+      });
+    }
+
+    if (typeof mode !== 'string' || (mode !== 'own-key' && mode !== 'default')) {
+      return res.status(400).json({
+        error: 'Invalid mode',
+        message: 'Please select a valid claim mode (own-key or default)'
+      });
+    }
+
+    if (typeof password === 'string' && password.length > 1024) {
+      return res.status(400).json({ error: 'Invalid input', message: 'Input too long' });
+    }
+
+    const canonical = canonicalizeAddress(address, blockchain);
+    if (!canonical) {
+      return res.status(400).json({
+        error: 'Invalid address',
+        message: `The address is not a valid ${blockchain} address`
       });
     }
 
     if (!native && !usdc && !eurc) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'No tokens selected',
         message: 'Please select at least one token to claim'
+      });
+    }
+
+    // Infrastructure DoS guard (fail-open on KV errors, see rate-limit.js)
+    const infraCheck = await checkInfraLimit(clientIp);
+    if (!infraCheck.allowed) {
+      auditLog({ event: 'infra_limit_exceeded', ip: sha256Hex(clientIp).substring(0, 16) });
+      return res.status(429).json({
+        error: 'Too many requests',
+        message: 'Infrastructure rate limit exceeded (100 req/hour). Please try again later.',
+        resetTime: infraCheck.resetTime
       });
     }
 
@@ -324,34 +204,34 @@ export default async function handler(req, res) {
       mode,
       blockchain,
       tokens: { native, usdc, eurc },
-      walletHash: crypto.createHash('sha256').update(address).digest('hex').substring(0, 16),
-      ipHash: crypto.createHash('sha256').update(clientIp).digest('hex').substring(0, 16)
+      walletHash: sha256Hex(canonical.identity).substring(0, 16),
+      ipHash: sha256Hex(clientIp).substring(0, 16)
     };
 
-    let circleApiKey = '';
-    let usesFallback = false;
-    let usedKeyIndex = null;
+    // ---- Build Circle payload (user's own spelling goes on the wire) -----
+    const payload = { address: canonical.wire, blockchain };
+    if (native) payload.native = true;
+    if (usdc) payload.usdc = true;
+    if (eurc) payload.eurc = true;
 
-    // MODE 1: User's own API key
+    // ---- MODE 1: user's own API key --------------------------------------
     if (mode === 'own-key') {
-      if (!apiKey) {
-        return res.status(400).json({ 
+      if (typeof apiKey !== 'string' || !apiKey) {
+        return res.status(400).json({
           error: 'API key required',
           message: 'Please provide your Circle API key'
         });
       }
-
-      if (!validateApiKey(apiKey)) {
+      if (!isValidCircleKeyFormat(apiKey)) {
         auditLog({ ...auditData, event: 'invalid_api_key_format' });
-        return res.status(400).json({ 
+        return res.status(400).json({
           error: 'Invalid API key',
           message: 'API key format is invalid. Expected: TEST_API_KEY:xxx:xxx'
         });
       }
 
-      const keyHash = hashApiKey(apiKey);
-      
-      if (REVOKED_KEY_HASHES.includes(keyHash)) {
+      const revokedHashes = (process.env.REVOKED_API_KEY_HASHES || '').split(',').filter(Boolean);
+      if (revokedHashes.includes(sha256Hex(apiKey))) {
         auditLog({ ...auditData, event: 'revoked_key_attempt' });
         return res.status(403).json({
           error: 'API key revoked',
@@ -359,133 +239,363 @@ export default async function handler(req, res) {
         });
       }
 
-      circleApiKey = apiKey;
-    } 
-    // MODE 2: Default faucet
-    else if (mode === 'default') {
-      if (!password) {
-        return res.status(400).json({ 
-          error: 'Password required',
-          message: 'Please provide the faucet password'
+      auditData.apiKeyHash = sha256Hex(apiKey).substring(0, 16);
+
+      let circleResponse;
+      try {
+        circleResponse = await makeCircleRequest(apiKey, payload);
+      } catch (error) {
+        // Ambiguous outcome: the drip may exist. Never auto-retry.
+        auditLog({ ...auditData, event: 'claim_unknown', error: error.message });
+        await scheduleAnalytics(startTime, mode, blockchain, false, null);
+        return res.status(503).json({
+          error: 'Outcome unknown',
+          message:
+            'The faucet API could not be reached after the request was sent. The claim may or may not have succeeded — check the wallet balance before retrying.'
         });
       }
 
-      const inputHash = hashPassword(password);
-      if (inputHash !== DEFAULT_PASSWORD_HASH) {
-        auditLog({ ...auditData, event: 'invalid_password', ip: auditData.ipHash });
-        return res.status(401).json({ 
-          error: 'Invalid password',
-          message: 'The password you entered is incorrect'
+      console.log('[CIRCLE_RESPONSE]', { statusCode: circleResponse.statusCode });
+
+      if (circleResponse.statusCode >= 200 && circleResponse.statusCode < 300) {
+        auditData.success = true;
+        auditData.duration = Date.now() - startTime;
+        auditLog({ ...auditData, event: 'claim_success' });
+        await scheduleAnalytics(startTime, mode, blockchain, true, null);
+        return res.status(200).json({
+          success: true,
+          message: 'Tokens claimed successfully',
+          transactionId: circleResponse.data.transactionId || circleResponse.data.id,
+          data: circleResponse.data
         });
       }
 
-      const apiKeys = getApiKeys();
-      if (apiKeys.length === 0) {
-        console.error('[ERROR] No Circle API keys configured');
-        return res.status(503).json({ 
-          error: 'No API keys configured',
-          message: 'Default faucet is not available. Please use your own API key.'
-        });
-      }
-
-      // Wallet-based rate limit
-      const walletHash = crypto.createHash('sha256').update(address + blockchain).digest('hex');
-      const walletLimit = checkRateLimit(`wallet:${walletHash}`, 1, 24 * 60 * 60 * 1000);
-      
-      if (!walletLimit.allowed) {
-        auditLog({ ...auditData, event: 'wallet_limit_exceeded' });
-        return res.status(429).json({
-          error: 'Wallet rate limit exceeded',
-          message: 'This wallet already claimed tokens on this network in the last 24 hours',
-          resetTime: walletLimit.resetTime
-        });
-      }
-      
-      recordRateLimit(`wallet:${walletHash}`);
-      usesFallback = true;
-    } else {
-      return res.status(400).json({ 
-        error: 'Invalid mode',
-        message: 'Please select a valid claim mode (own-key or default)'
+      await scheduleAnalytics(startTime, mode, blockchain, false, null);
+      auditLog({
+        ...auditData,
+        event: 'circle_api_error',
+        statusCode: circleResponse.statusCode,
+        error: circleResponse.data?.message
+      });
+      return res.status(circleResponse.statusCode).json({
+        error: 'Circle API error',
+        message: circleResponse.data?.message || 'Failed to claim tokens',
+        code: circleResponse.data?.code
       });
     }
 
-    // Build Circle API payload
-    const payload = {
-      address: address,
-      blockchain: SUPPORTED_CHAINS[blockchain]
-    };
-
-    if (native) payload.native = true;
-    if (usdc) payload.usdc = true;
-    if (eurc) payload.eurc = true;
-
-    console.log('[CIRCLE_REQUEST]', { blockchain: payload.blockchain, tokens: { native, usdc, eurc } });
-
-    // Make request to Circle API (with fallback for default mode)
-    let circleResponse;
-    
-    if (usesFallback) {
-      const result = await makeCircleRequestWithFallback(payload);
-      circleResponse = result.response;
-      usedKeyIndex = result.keyIndex;
-    } else {
-      circleResponse = await makeCircleRequest(circleApiKey, payload);
+    // ---- MODE 2: default faucet ------------------------------------------
+    if (typeof password !== 'string' || !password) {
+      return res.status(400).json({
+        error: 'Password required',
+        message: 'Please provide the faucet password'
+      });
     }
 
-    console.log('[CIRCLE_RESPONSE]', { statusCode: circleResponse.statusCode });
+    const expectedHash = (process.env.DEFAULT_PASSWORD_HASH || '').trim();
+    if (!expectedHash || !isSha256Hex(expectedHash)) {
+      // Fail closed: unset OR malformed (e.g. the published placeholder) can
+      // never authenticate — and never by echoing the configured string.
+      console.error('[ERROR] DEFAULT_PASSWORD_HASH is missing or not a sha256 hex digest');
+      return res.status(503).json({
+        error: 'Faucet not configured',
+        message: 'Default faucet is not available. Please use your own API key.'
+      });
+    }
+    if (!safeEqualHex(password.trim(), expectedHash)) {
+      auditLog({ ...auditData, event: 'invalid_password', ip: auditData.ipHash });
+      return res.status(401).json({
+        error: 'Invalid password',
+        message: 'The password you entered is incorrect'
+      });
+    }
 
-    // Handle successful claim
-    if (circleResponse.statusCode >= 200 && circleResponse.statusCode < 300) {
+    const apiKeys = getApiKeys();
+    if (apiKeys.length === 0) {
+      console.error('[ERROR] No Circle API keys configured');
+      return res.status(503).json({
+        error: 'No API keys configured',
+        message: 'Default faucet is not available. Please use your own API key.'
+      });
+    }
+
+    // Reserve the per-IP daily claim (atomic INCR) — protects the shared keys
+    // from one client draining them through many wallets.
+    let ipReservation;
+    try {
+      ipReservation = await reserveIpDailyClaim(clientIp);
+    } catch (error) {
+      console.error('[ERROR] KV unavailable for IP limit:', error.message);
+      return res.status(503).json({
+        error: 'Faucet unavailable',
+        message: 'The default faucet is temporarily unavailable. Please try again later.'
+      });
+    }
+    if (!ipReservation.allowed) {
+      auditLog({ ...auditData, event: 'ip_limit_exceeded' });
+      return res.status(429).json({
+        error: 'IP rate limit exceeded',
+        message: 'This IP already claimed its daily limit of tokens',
+        resetTime: ipReservation.resetTime
+      });
+    }
+
+    // N6: bail before taking the lock if the shared budget is already spent.
+    const preLockRemainingMs = getRequestBudgetMs() - (Date.now() - startTime);
+    if (preLockRemainingMs < MIN_CIRCLE_ATTEMPT_MS) {
+      auditLog({ ...auditData, event: 'request_budget_exhausted', preLockRemainingMs });
+      await releaseIpDailyClaim(clientIp, ipReservation.day);
+      return res.status(503).json({
+        error: 'Faucet unavailable',
+        message: 'The faucet is temporarily overloaded. Please try again in a moment.'
+      });
+    }
+
+    // Acquire the atomic per-wallet claim lock — exactly one concurrent
+    // claim per wallet/network wins, across all instances. The lock carries
+    // a unique ownership token and starts with a 90s provisional TTL: an
+    // acquire whose response was lost to a KV deadline race is detected via
+    // the token, and orphans created BEFORE the 24h extension self-heal in
+    // <=90s. (After the extension, the lock is 24h by design — see the
+    // release paths below for how failures there are handled and audited.)
+    const lock = await acquireWalletLock(canonical.identity, blockchain);
+    if (lock.acquired) {
+      heldLock = { identity: canonical.identity, blockchain, token: lock.token };
+    }
+    if (!lock.acquired && lock.contested) {
+      // Definitively contested: another claimant verifiably holds the lock.
+      auditLog({ ...auditData, event: 'wallet_limit_exceeded' });
+      await releaseIpDailyClaim(clientIp, ipReservation.day);
+      return res.status(429).json({
+        error: 'Wallet rate limit exceeded',
+        message: 'This wallet already claimed tokens on this network in the last 24 hours',
+        resetTime: new Date(Date.now() + 24 * 60 * 60 * 1000)
+      });
+    }
+    if (!lock.acquired) {
+      // KV misbehaved during acquire (deadline raced the SET, or the
+      // ownership check failed too). Fail closed, but NOT at the wallet's
+      // expense: ownership-checked cleanup removes our lock if it applied,
+      // the IP slot is returned, and any residual orphan self-heals in <=90s.
+      // (If the cleanup itself fails, the lock expires with its provisional
+      // 90s TTL — pre-extension, so no 24h orphan is possible here.)
+      const cleaned = await releaseWalletLock(canonical.identity, blockchain, lock.token);
+      await releaseIpDailyClaim(clientIp, ipReservation.day);
+      // N11: 'absent' (SET never applied / someone else owns it) is NOT a
+      // failure — only 'failed' means a lock may still be out there.
+      auditLog({
+        ...auditData,
+        event: 'wallet_lock_uncertain',
+        lockReleased: cleaned !== 'failed',
+        ...(cleaned === 'failed' ? { lockKey: walletLockKey(canonical.identity, blockchain) } : {})
+      });
+      return res.status(503).json({
+        error: 'Faucet unavailable',
+        message: 'The default faucet is temporarily unavailable. Please try again later.'
+      });
+    }
+
+    // Bounded parallel cleanup. The cap bounds only how long a degraded KV
+    // can delay the RESPONSE. Lock-release failures are NOT silently
+    // absorbed: after the write-ahead extension the lock holds a 24h TTL, so
+    // a failed release burns the wallet for a day. The release itself
+    // retries internally; if it still fails (or the cap elapses first) we
+    // emit an audit event carrying the exact Redis key so ops can alert and
+    // clear it with scripts/clear-lock.mjs. IP counters need no such
+    // treatment — they are bucket-scoped and roll over with their window.
+    const lockKey = walletLockKey(canonical.identity, blockchain);
+    const releaseReservations = async () => {
+      const cap = new Promise((r) => {
+        const t = setTimeout(r, 1600);
+        if (typeof t.unref === 'function') t.unref();
+      });
+      // Track the LOCK half separately: the lock is the only reservation that
+      // can burn a wallet, so only ITS lateness/failure may page ops. The IP
+      // counter is bucket-scoped and rolls over with its window — a slow IP
+      // release must not emit lock_release_timeout (it would be a false
+      // alarm about a lock that was in fact released).
+      let lockOutcome = null; // 'released' | 'absent' | 'failed' | null while in flight
+      const settled = await Promise.race([
+        Promise.all([
+          releaseWalletLock(canonical.identity, blockchain, lock.token).then((r) => (lockOutcome = r)),
+          releaseIpDailyClaim(clientIp, ipReservation.day)
+        ]),
+        cap.then(() => ({ timedOut: true }))
+      ]);
+      if (settled && settled.timedOut) {
+        if (lockOutcome === null) {
+          // The lock release did not finish inside the cap. On a frozen
+          // serverless instance it will never finish: audit for clearance.
+          auditLog({ ...auditData, event: 'lock_release_timeout', lockKey });
+        }
+        // else: lock was released/absent in time — only the IP counter lagged.
+      } else if (lockOutcome === 'failed') {
+        // N11: 'absent' is a normal outcome (nothing of ours left behind);
+        // only 'failed' means a 24h lock may remain.
+        auditLog({ ...auditData, event: 'lock_release_failed', lockKey });
+      }
+    };
+
+    // N10: the budget decision happens BEFORE the 24h extension — a bail-out
+    // here only has to release the provisional 90s lock, which self-heals
+    // even if the release itself fails. (The fallback loop re-checks the
+    // budget with the same floor after every rotation INCR; its floor is
+    // what catches a budget that dies inside the extension.)
+    const preExtendRemainingMs = getRequestBudgetMs() - (Date.now() - startTime);
+    if (preExtendRemainingMs < MIN_CIRCLE_ATTEMPT_MS) {
+      auditLog({ ...auditData, event: 'request_budget_exhausted', remainingBudgetMs: preExtendRemainingMs });
+      await releaseReservations();
+      return res.status(503).json({
+        error: 'Faucet unavailable',
+        message: 'The faucet is temporarily overloaded. Please try again in a moment.'
+      });
+    }
+
+    // N5: establish the 24h TTL WRITE-AHEAD. Awaited BEFORE anything is sent
+    // to Circle: if it fails we fail closed with nothing sent, and every
+    // post-send failure mode (freeze, crash, dropped work) then leaves the
+    // conservative 24h lock. If the send is later abandoned on an orderly
+    // error path, releaseReservations removes the lock by token.
+    const extended = await extendWalletLock(canonical.identity, blockchain, lock.token);
+    if (!extended) {
+      console.error('[ERROR] Could not establish the 24h wallet lock (KV failure)');
+      auditLog({ ...auditData, event: 'wallet_lock_extend_failed', lockKey });
+      await releaseReservations();
+      return res.status(503).json({
+        error: 'Faucet unavailable',
+        message: 'The default faucet is temporarily unavailable. Please try again later.'
+      });
+    }
+
+    // ---- Call Circle with bounded, ambiguity-safe fallback ----------------
+    // If this throws (e.g. a KV failure while advancing rotation) NOTHING has
+    // been sent to Circle — release both reservations so the wallet/IP are
+    // not burned by an infrastructure blip, then let the outer handler 500.
+    let result;
+    try {
+      result = await claimWithFallback(payload, {
+        keys: apiKeys,
+        // Measured AT CALL TIME (after the extension) so the extension's cost
+        // is charged to the Circle attempts; the loop re-checks it after
+        // every rotation INCR (N8/N9).
+        totalDeadlineMs: getRequestBudgetMs() - (Date.now() - startTime)
+      });
+    } catch (error) {
+      await releaseReservations();
+      throw error;
+    }
+
+    const usedKeyIndex = result.keyIndex;
+
+    if (result.outcome === 'success') {
       auditData.success = true;
       auditData.duration = Date.now() - startTime;
       auditLog({ ...auditData, event: 'claim_success', keyIndex: usedKeyIndex });
-      
-      // Update analytics in KV
-      await updateAnalytics(mode, blockchain, true, usedKeyIndex);
-      
+      await scheduleAnalytics(startTime, mode, blockchain, true, usedKeyIndex);
+      // The 24h lock was established write-ahead; success simply keeps it.
+      heldLock = null;
       return res.status(200).json({
         success: true,
         message: 'Tokens claimed successfully',
-        transactionId: circleResponse.data.transactionId || circleResponse.data.id,
-        data: circleResponse.data
+        transactionId: result.response.data.transactionId || result.response.data.id,
+        data: result.response.data
       });
     }
 
-    // Update analytics for failed claim
-    await updateAnalytics(mode, blockchain, false, usedKeyIndex);
+    if (result.outcome === 'budget_exhausted') {
+      // The rotation INCR consumed the remaining budget: nothing was sent.
+      // Release everything — the wallet/IP are not punished for slow KV.
+      auditLog({ ...auditData, event: 'request_budget_exhausted', keyIndex: usedKeyIndex });
+      await releaseReservations();
+      await scheduleAnalytics(startTime, mode, blockchain, false, usedKeyIndex);
+      return res.status(503).json({
+        error: 'Faucet unavailable',
+        message: 'The faucet is temporarily overloaded. Please try again in a moment.'
+      });
+    }
 
-    // Handle Circle API errors
-    auditLog({ 
-      ...auditData, 
+    if (result.outcome === 'unknown') {
+      // Ambiguous (transport loss, or Circle 5xx/408 that may have executed
+      // the drip): keep lock + IP reservation (prevents double drip), tell
+      // the user to check their wallet instead of blindly retrying.
+      auditLog({
+        ...auditData,
+        event: 'claim_unknown',
+        error: result.error?.message,
+        statusCode: result.statusCode,
+        keyIndex: usedKeyIndex
+      });
+      await scheduleAnalytics(startTime, mode, blockchain, false, usedKeyIndex);
+      // Possibly dispensed: the wallet stays locked — the 24h TTL was already
+      // established write-ahead, so nothing post-send is required to keep it.
+      heldLock = null; // intentionally KEPT (24h from the write-ahead extend)
+      const upstreamError = typeof result.statusCode === 'number';
+      return res.status(upstreamError ? 502 : 503).json({
+        error: 'Outcome unknown',
+        message:
+          'The claim request was sent but the response was lost. The claim may or may not have succeeded — check the wallet balance before retrying.'
+      });
+    }
+
+    // Definitive failure (Circle rejected the request): give the wallet and
+    // the IP their quota back.
+    await releaseReservations();
+    await scheduleAnalytics(startTime, mode, blockchain, false, usedKeyIndex);
+
+    if (result.outcome === 'exhausted') {
+      auditLog({ ...auditData, event: 'keys_exhausted', statusCode: result.lastResponse?.statusCode });
+      // N12: Circle's own message/code/details pass through unchanged from
+      // the original implementation — only the `error` category label is the
+      // faucet's own (documented in the PR release notes).
+      return res.status(result.lastResponse?.statusCode || 429).json({
+        error: 'All API keys exhausted',
+        message: result.lastResponse?.data?.message || 'All faucet API keys are currently rate-limited. Please try again later.',
+        code: result.lastResponse?.data?.code,
+        details: result.lastResponse?.data
+      });
+    }
+
+    // circle_error: definitive non-429, non-5xx rejection from Circle
+    auditLog({
+      ...auditData,
       event: 'circle_api_error',
-      statusCode: circleResponse.statusCode,
-      error: circleResponse.data.message,
+      statusCode: result.response.statusCode,
+      error: result.response.data?.message,
       keyIndex: usedKeyIndex
     });
-    
-    return res.status(circleResponse.statusCode).json({
+    return res.status(result.response.statusCode).json({
       error: 'Circle API error',
-      message: circleResponse.data.message || 'Failed to claim tokens',
-      code: circleResponse.data.code,
-      details: circleResponse.data
+      message: result.response.data?.message || 'Failed to claim tokens',
+      code: result.response.data?.code,
+      details: result.response.data // N12: restored (original pass-through)
     });
-
   } catch (error) {
     console.error('[FATAL_ERROR]', error);
-    auditLog({ 
-      ...auditData, 
+    auditLog({
+      ...auditData,
       event: 'internal_error',
       error: error.message,
       stack: error.stack
     });
-    
-    // Update analytics for error
+
+    // Last-resort sweep: if we still hold an unconfirmed lock at this point,
+    // nothing was dispensed (all dispensing paths handle the lock explicitly).
+    if (heldLock) {
+      const released = await releaseWalletLock(heldLock.identity, heldLock.blockchain, heldLock.token);
+      if (released === 'failed') {
+        auditLog({
+          event: 'lock_release_failed',
+          mode: auditData.mode,
+          lockKey: walletLockKey(heldLock.identity, heldLock.blockchain)
+        });
+      }
+    }
+
     if (auditData.mode && auditData.blockchain) {
       await updateAnalytics(auditData.mode, auditData.blockchain, false);
     }
-    
-    return res.status(500).json({ 
+
+    return res.status(500).json({
       error: 'Internal server error',
       message: 'An unexpected error occurred. Please try again.',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
