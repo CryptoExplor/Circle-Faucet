@@ -136,6 +136,8 @@ circle-faucet/
 3. Generate **multiple Test API Keys** (recommended: 3-5 keys for better distribution)
 4. Copy the keys (format: `TEST_API_KEY:xxx:xxx`)
 
+> ⚠️ **Important:** Circle's faucet/drip endpoints require the API key to belong to a **mainnet-verified Circle account** — this applies even when dripping *testnet* tokens. An unverified developer account can create test keys but will be rejected by the faucet with an error.
+
 ### 2. Environment Variables Setup
 
 Create a `.env` file in the root directory:
