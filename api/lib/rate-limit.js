@@ -43,7 +43,11 @@ import { sha256Hex, clientIpBucket } from './validate.js';
  *     so GET-compare-then-DEL is a safe ownership-checked release without Lua.
  *  2. Acquire sets a PROVISIONAL TTL (90s): an orphan created before the
  *     extension point (ambiguous acquire, pre-POST crash) self-heals in
- *     <=90 seconds. No wallet is burned for 24h by pre-send infrastructure.
+ *     <=90 seconds. AFTER a successful extension the lock is 24h by design;
+ *     a release that fails during a KV brownout can therefore leave a 24h
+ *     lock on a wallet that received nothing. Such failures are retried and
+ *     audited with the exact Redis key (see scripts/clear-lock.mjs), but the
+ *     24h TTL — not 90s — is the bound on that incident window.
  *  3. The 24h TTL is established WRITE-AHEAD: before anything is sent to
  *     Circle, the holder extends the lock with an awaited EXPIRE (one atomic
  *     command that preserves the ownership token as the value). If the
@@ -252,19 +256,37 @@ export async function extendWalletLock(identity, blockchain, token) {
  */
 export async function releaseWalletLock(identity, blockchain, token) {
   if (typeof token !== 'string' || token.length === 0) return false;
-  try {
-    const kv = await getKv();
-    const key = walletLockKey(identity, blockchain);
-    const current = await kv.get(key);
-    if (current !== token) return false; // not ours (anymore)
-    await kv.del(key);
-    return true;
-  } catch (error) {
-    console.error('[RATE_LIMIT] failed to release wallet lock (self-heals in <=90s):', error.message);
-    return false;
+  const key = walletLockKey(identity, blockchain);
+  // A failed release leaves the CONSERVATIVE 24h lock on a wallet that
+  // received nothing, so transient KV blips are retried here (bounded).
+  // Persistent failure is surfaced to the caller (false) which audits the
+  // exact key for manual clearance via scripts/clear-lock.mjs.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const kv = await getKv();
+      const current = await kv.get(key);
+      if (current !== token) return attempt > 0; // not ours (anymore); a prior attempt may have succeeded
+      await kv.del(key);
+      return true;
+    } catch (error) {
+      console.error(`[RATE_LIMIT] wallet lock release attempt ${attempt + 1}/3 failed:`, error.message);
+      if (attempt < 2) {
+        // Deliberately NOT unref'd: this backoff is part of the release we
+        // are awaiting on the response path, and an unref'd timer here lets
+        // the event loop drain mid-retry.
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    }
   }
+  console.error(`[RATE_LIMIT] wallet lock release FAILED after retries — key ${key} holds a 24h lock; clear via scripts/clear-lock.mjs`);
+  return false;
 }
 
-function walletLockKey(identity, blockchain) {
+/**
+ * The exact Redis key backing a wallet lock. Exported for audit payloads and
+ * scripts/clear-lock.mjs — the hash cannot be reversed from a bare key, so
+ * deriving it here is what makes manual clearance possible.
+ */
+export function walletLockKey(identity, blockchain) {
   return `faucet:lock:${sha256Hex(identity + ':' + blockchain)}`;
 }

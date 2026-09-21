@@ -310,6 +310,147 @@ test('default mode: no API keys configured -> 503', async () => {
   assert.equal(res.statusCode, 503);
 });
 
+// Helper: capture [AUDIT] lines while fn runs
+async function captureAudits(fn) {
+  const lines = [];
+  const orig = console.log;
+  console.log = (...args) => {
+    if (typeof args[0] === 'string' && args[0].startsWith('[AUDIT]')) lines.push(args.join(' '));
+  };
+  try {
+    return { result: await fn(), lines };
+  } finally {
+    console.log = orig;
+  }
+}
+
+test('S1: Circle 400 + transiently failing lock DEL -> retry succeeds, lock removed', async () => {
+  const base = createFakeKv();
+  let delFailures = 0;
+  setKvClientForTests({
+    get: (k) => base.get(k),
+    set: (k, v, o) => base.set(k, v, o),
+    del: async (k) => {
+      if (k.startsWith('faucet:lock:') && delFailures < 2) {
+        delFailures++;
+        throw new Error('KV blip on DEL');
+      }
+      return base.del(...(Array.isArray(k) ? k : [k]));
+    },
+    incr: (k) => base.incr(k),
+    decr: (k) => base.decr(k),
+    expire: (k, sec) => base.expire(k, sec),
+    hgetall: (k) => base.hgetall(k),
+    hincrby: (k, f, b) => base.hincrby(k, f, b)
+  });
+  setRequesterForTests(async () => ({ statusCode: 400, data: { code: 0, message: 'rejected' } }));
+
+  const { result: res } = await captureAudits(() =>
+    claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD })
+  );
+  assert.equal(res.statusCode, 400, 'definitive Circle rejection passes through');
+  assert.ok(delFailures >= 1, 'the DEL actually failed transiently');
+  // the retried release must have removed the lock
+  assert.equal([...base._dump().keys()].some((k) => k.startsWith('faucet:lock:')), false, 'lock removed after retry');
+});
+
+test('S1-hard: Circle 400 + permanently failing lock DEL -> 400, audited with the exact key', async () => {
+  const base = createFakeKv();
+  setKvClientForTests({
+    get: (k) => base.get(k),
+    set: (k, v, o) => base.set(k, v, o),
+    del: async (k) => {
+      if (k.startsWith('faucet:lock:')) throw new Error('KV down on DEL');
+      return base.del(...(Array.isArray(k) ? k : [k]));
+    },
+    incr: (k) => base.incr(k),
+    decr: (k) => base.decr(k),
+    expire: (k, sec) => base.expire(k, sec),
+    hgetall: (k) => base.hgetall(k),
+    hincrby: (k, f, b) => base.hincrby(k, f, b)
+  });
+  setRequesterForTests(async () => ({ statusCode: 400, data: { code: 0, message: 'rejected' } }));
+
+  const { result: res, lines } = await captureAudits(() =>
+    claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD })
+  );
+  assert.equal(res.statusCode, 400);
+  const failure = lines.find((l) => l.includes('lock_release_failed'));
+  assert.ok(failure, 'failed release must be audited');
+  assert.ok(failure.includes('faucet:lock:'), 'audit carries the exact Redis key for ops');
+  // honest state: the 24h lock REMAINS (documented trade-off) — reviewer's S1 scenario
+  assert.equal([...base._dump().keys()].some((k) => k.startsWith('faucet:lock:')), true, 'lock persists when DEL is impossible');
+});
+
+test('S2: ambiguous EXPIRE + failed cleanup -> 503 and audited failed release', async () => {
+  const base = createFakeKv();
+  let lockSetBlipped = false;
+  setKvClientForTests({
+    get: async () => {
+      throw new Error('KV down (ownership check also fails)');
+    },
+    set: async (k, v, o) => {
+      if (!lockSetBlipped && k.startsWith('faucet:lock:')) {
+        lockSetBlipped = true;
+        await base.set(k, v, o); // SET applies...
+        throw new Error('KV command timed out: set'); // ...response lost
+      }
+      return base.set(k, v, o);
+    },
+    del: async (k) => {
+      if (k.startsWith('faucet:lock:')) throw new Error('KV down on DEL');
+      return base.del(...(Array.isArray(k) ? k : [k]));
+    },
+    incr: (k) => base.incr(k),
+    decr: (k) => base.decr(k),
+    expire: async (k, sec) => {
+      if (k.startsWith('faucet:lock:') && sec === 86400) throw new Error('KV down on EXPIRE');
+      return base.expire(k, sec);
+    },
+    hgetall: (k) => base.hgetall(k),
+    hincrby: (k, f, b) => base.hincrby(k, f, b)
+  });
+  setRequesterForTests(async () => ({ statusCode: 200, data: { transactionId: 'tx' } }));
+
+  const { result: res, lines } = await captureAudits(() =>
+    claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD })
+  );
+  assert.equal(res.statusCode, 503, 'fail closed: extend failed, nothing sent');
+  const uncertain = lines.find((l) => l.includes('wallet_lock_uncertain'));
+  assert.ok(uncertain, 'ambiguous acquire audited');
+  // The cleanup could not verify ownership (GET fails) -> provisional 90s orphan
+  // self-heals; the audit line reports lockReleased:false for observability.
+  assert.match(uncertain, /"lockReleased":false/);
+});
+
+test('N8: per-attempt Circle timeout reflects the budget AFTER the rotation INCR', async () => {
+  process.env.CLAIM_REQUEST_BUDGET_MS = '6000';
+  const base = createFakeKv();
+  const slow = {};
+  for (const m of ['get', 'del', 'incr', 'decr', 'expire', 'hgetall', 'hincrby', 'set']) {
+    slow[m] = async (...a) => {
+      await new Promise((r) => setTimeout(r, 500));
+      return base[m](...a);
+    };
+  }
+  setKvClientForTests(slow);
+  let seenTimeout = null;
+  setRequesterForTests(async (key, payload, timeoutMs) => {
+    seenTimeout = timeoutMs;
+    return { statusCode: 200, data: { transactionId: 'tx' } };
+  });
+
+  const res = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  assert.equal(res.statusCode, 200);
+  // Pre-Circle KV: 2 pipelines (2 cmds each = 2000ms) + lock SET (500ms) +
+  // EXPIRE extend (500ms) = ~3000ms, leaving ~3000ms. The rotation INCR
+  // (500ms) happens AFTER that measurement, so the attempt must be charged
+  // the post-INCR remaining (~2500ms), not the stale ~3000ms value.
+  assert.ok(seenTimeout !== null, 'Circle request must be attempted');
+  assert.ok(seenTimeout <= 2600, `timeout must be post-INCR remaining (got ${seenTimeout}ms)`);
+  assert.ok(seenTimeout >= 1000, `timeout must still be a usable slice (got ${seenTimeout}ms)`);
+});
+
 test('N5: the 24h TTL is already in place AT RESPONSE TIME (no post-send lock work)', async () => {
   // Freeze-style regression test for round-3 N5: unregistered post-response
   // work has no execution guarantee on serverless, so the 24h TTL must be

@@ -86,12 +86,16 @@ test('total deadline bounds retry attempts', async () => {
     totalDeadlineMs: 1000
   });
   const elapsed = Date.now() - start;
-  assert.equal(r.outcome, 'exhausted');
+  // N8: remaining is recomputed AFTER the rotation INCR; once it drops under
+  // 500ms no further Circle request is sent at all (budget_exhausted) — the
+  // old behavior fired one more doomed request that could still dispense
+  // after the caller's deadline.
+  assert.equal(r.outcome, 'budget_exhausted');
   assert.ok(calls < keys.length, `deadline must cut retries short (made ${calls} calls)`);
   assert.ok(elapsed < 1500, `must respect deadline, took ${elapsed}ms`);
 });
 
-test('the first attempt always runs even if the budget is already tight', async () => {
+test('a sub-500ms remainder bails BEFORE the first attempt (nothing sent)', async () => {
   let calls = 0;
   const requester = async () => {
     calls++;
@@ -102,8 +106,11 @@ test('the first attempt always runs even if the budget is already tight', async 
     requester,
     totalDeadlineMs: 1 // pathological: no budget at all
   });
-  assert.equal(r.outcome, 'exhausted');
-  assert.equal(calls, 1, 'attempt #1 must never be skipped');
+  // N8 semantics: even attempt #1 is skipped when the remainder cannot fund
+  // a meaningful Circle call — a request sent now could still dispense after
+  // the handler has been torn down, with no way to credit it.
+  assert.equal(r.outcome, 'budget_exhausted');
+  assert.equal(calls, 0, 'no Circle request may be sent on a hopeless budget');
 });
 
 test('maxAttempts caps fallback regardless of key count', async () => {

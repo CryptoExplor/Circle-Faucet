@@ -147,6 +147,7 @@ function isAmbiguousStatus(statusCode) {
  *   | {outcome: 'exhausted', lastResponse: object|null, keyIndex: number|null}
  *   | {outcome: 'circle_error', response: object, keyIndex: number}
  *   | {outcome: 'unknown', error?: Error, response?: object, statusCode?: number, keyIndex: number}
+ *   | {outcome: 'budget_exhausted', keyIndex: number}  // nothing was sent
  * >}
  */
 export async function claimWithFallback(payload, opts) {
@@ -161,14 +162,23 @@ export async function claimWithFallback(payload, opts) {
   let lastIndex = null;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const remaining = totalDeadlineMs - (Date.now() - start);
-    // The FIRST attempt always runs (an over-tight deadline must never turn
-    // into an instant "exhausted"); retries need real budget left.
-    if (attempt > 0 && remaining < 500) break;
-
     // May throw on KV failure. Nothing has been sent to Circle yet, so the
     // caller may safely release reservations in that case.
     const { index } = await advanceRotation(keys.length);
+
+    // Recompute the remaining budget AFTER the rotation INCR: that KV round
+    // trip can take up to the KV command deadline, and charging it to the
+    // Circle timeout would let per-attempt deadlines overshoot the total
+    // (N8). Too little left -> explicitly abandon WITHOUT sending anything.
+    const remaining = totalDeadlineMs - (Date.now() - start);
+    if (remaining < 500) {
+      console.error(
+        attempt === 0
+          ? '[FALLBACK] Budget exhausted before the first Circle request — nothing was sent'
+          : `[FALLBACK] Budget exhausted after ${attempt} Circle attempt(s) — no further request will be sent`
+      );
+      return { outcome: 'budget_exhausted', keyIndex: index };
+    }
     const timeoutMs = Math.min(perRequestTimeoutMs, remaining);
 
     try {

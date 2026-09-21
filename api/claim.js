@@ -7,7 +7,7 @@
  *
  *  - All shared state (wallet locks, IP limits, key rotation, analytics) uses
  *    ATOMIC Vercel KV commands. Every KV command is deadline-bounded and the
- *    whole request shares one budget (CLAIM_REQUEST_BUDGET_MS, default 8.5s):
+ *    whole request shares one budget (CLAIM_REQUEST_BUDGET_MS, default 8s):
  *    the Circle fallback inherits the REMAINING budget, and if too little is
  *    left to attempt a claim the reservations are released and 503 is
  *    returned before anything is sent. Analytics are awaited only while the
@@ -15,7 +15,10 @@
  *    lossy counters and never run after the response). The design target is
  *    maxDuration 10s for KV latencies up to ~1.3s per command; beyond that,
  *    requests degrade to fail-closed 503s whose wall time is bounded by the
- *    per-command deadlines (1.5s) rather than by the budget.
+ *    per-command deadlines (1.5s) rather than by the budget. A failed
+ *    release during a KV brownout CAN leave the conservative 24h lock: the
+ *    release is retried and audited with the exact Redis key, and
+ *    scripts/clear-lock.mjs removes it manually.
  *  - Wallet addresses are validated per chain; a canonical identity form
  *    keys the rate limits (case/whitespace/short-form bypass fixed) while the
  *    user's own spelling is sent to Circle.
@@ -44,7 +47,8 @@ import {
   releaseWalletLock,
   reserveIpDailyClaim,
   releaseIpDailyClaim,
-  checkInfraLimit
+  checkInfraLimit,
+  walletLockKey
 } from './lib/rate-limit.js';
 import {
   SUPPORTED_CHAINS,
@@ -71,7 +75,7 @@ const getApiKeys = () =>
 // so ops/tests can tune it without reloading the module.
 const getRequestBudgetMs = () => {
   const n = parseInt(process.env.CLAIM_REQUEST_BUDGET_MS, 10);
-  return Number.isInteger(n) && n >= 3000 && n <= 30000 ? n : 8500;
+  return Number.isInteger(n) && n >= 3000 && n <= 30000 ? n : 8000;
 };
 // Below this there is no point starting a Circle attempt.
 const MIN_CIRCLE_ATTEMPT_MS = 1500;
@@ -349,9 +353,11 @@ export default async function handler(req, res) {
 
     // Acquire the atomic per-wallet claim lock — exactly one concurrent
     // claim per wallet/network wins, across all instances. The lock carries
-    // a unique ownership token and a 90s provisional TTL: an acquire whose
-    // response was lost to a KV deadline race is detected via the token, and
-    // any lock that never gets confirmed self-heals in <=90s (no 24h orphans).
+    // a unique ownership token and starts with a 90s provisional TTL: an
+    // acquire whose response was lost to a KV deadline race is detected via
+    // the token, and orphans created BEFORE the 24h extension self-heal in
+    // <=90s. (After the extension, the lock is 24h by design — see the
+    // release paths below for how failures there are handled and audited.)
     const lock = await acquireWalletLock(canonical.identity, blockchain);
     if (lock.acquired) {
       heldLock = { identity: canonical.identity, blockchain, token: lock.token };
@@ -371,28 +377,48 @@ export default async function handler(req, res) {
       // ownership check failed too). Fail closed, but NOT at the wallet's
       // expense: ownership-checked cleanup removes our lock if it applied,
       // the IP slot is returned, and any residual orphan self-heals in <=90s.
-      await releaseWalletLock(canonical.identity, blockchain, lock.token);
+      // (If the cleanup itself fails, the lock expires with its provisional
+      // 90s TTL — pre-extension, so no 24h orphan is possible here.)
+      const cleaned = await releaseWalletLock(canonical.identity, blockchain, lock.token);
       await releaseIpDailyClaim(clientIp, ipReservation.day);
-      auditLog({ ...auditData, event: 'wallet_lock_uncertain' });
+      auditLog({
+        ...auditData,
+        event: 'wallet_lock_uncertain',
+        lockReleased: cleaned,
+        ...(cleaned ? {} : { lockKey: walletLockKey(canonical.identity, blockchain) })
+      });
       return res.status(503).json({
         error: 'Faucet unavailable',
         message: 'The default faucet is temporarily unavailable. Please try again later.'
       });
     }
 
-    // Bounded parallel cleanup: releases never reject; the cap only bounds
-    // how long a degraded KV can delay the response — anything left behind
-    // self-heals (lock <=90s provisional / counter rolls over with its bucket).
+    // Bounded parallel cleanup. The cap bounds only how long a degraded KV
+    // can delay the RESPONSE. Lock-release failures are NOT silently
+    // absorbed: after the write-ahead extension the lock holds a 24h TTL, so
+    // a failed release burns the wallet for a day. The release itself
+    // retries internally; if it still fails (or the cap elapses first) we
+    // emit an audit event carrying the exact Redis key so ops can alert and
+    // clear it with scripts/clear-lock.mjs. IP counters need no such
+    // treatment — they are bucket-scoped and roll over with their window.
+    const lockKey = walletLockKey(canonical.identity, blockchain);
     const releaseReservations = async () => {
-      const cleanup = Promise.all([
-        releaseWalletLock(canonical.identity, blockchain, lock.token),
-        releaseIpDailyClaim(clientIp, ipReservation.day)
-      ]);
       const cap = new Promise((r) => {
         const t = setTimeout(r, 1600);
         if (typeof t.unref === 'function') t.unref();
       });
-      await Promise.race([cleanup, cap]);
+      const settled = await Promise.race([
+        Promise.all([
+          releaseWalletLock(canonical.identity, blockchain, lock.token),
+          releaseIpDailyClaim(clientIp, ipReservation.day)
+        ]).then(([lockReleased]) => ({ timedOut: false, lockReleased })),
+        cap.then(() => ({ timedOut: true, lockReleased: null }))
+      ]);
+      if (settled.timedOut) {
+        auditLog({ ...auditData, event: 'lock_release_timeout', lockKey });
+      } else if (!settled.lockReleased) {
+        auditLog({ ...auditData, event: 'lock_release_failed', lockKey });
+      }
     };
 
     // N5: establish the 24h TTL WRITE-AHEAD. Awaited BEFORE anything is sent
@@ -403,7 +429,7 @@ export default async function handler(req, res) {
     const extended = await extendWalletLock(canonical.identity, blockchain, lock.token);
     if (!extended) {
       console.error('[ERROR] Could not establish the 24h wallet lock (KV failure)');
-      auditLog({ ...auditData, event: 'wallet_lock_extend_failed' });
+      auditLog({ ...auditData, event: 'wallet_lock_extend_failed', lockKey });
       await releaseReservations();
       return res.status(503).json({
         error: 'Faucet unavailable',
@@ -453,6 +479,18 @@ export default async function handler(req, res) {
         message: 'Tokens claimed successfully',
         transactionId: result.response.data.transactionId || result.response.data.id,
         data: result.response.data
+      });
+    }
+
+    if (result.outcome === 'budget_exhausted') {
+      // The rotation INCR consumed the remaining budget: nothing was sent.
+      // Release everything — the wallet/IP are not punished for slow KV.
+      auditLog({ ...auditData, event: 'request_budget_exhausted', keyIndex: usedKeyIndex });
+      await releaseReservations();
+      await scheduleAnalytics(startTime, mode, blockchain, false, usedKeyIndex);
+      return res.status(503).json({
+        error: 'Faucet unavailable',
+        message: 'The faucet is temporarily overloaded. Please try again in a moment.'
       });
     }
 
@@ -517,7 +555,14 @@ export default async function handler(req, res) {
     // Last-resort sweep: if we still hold an unconfirmed lock at this point,
     // nothing was dispensed (all dispensing paths handle the lock explicitly).
     if (heldLock) {
-      await releaseWalletLock(heldLock.identity, heldLock.blockchain, heldLock.token);
+      const released = await releaseWalletLock(heldLock.identity, heldLock.blockchain, heldLock.token);
+      if (!released) {
+        auditLog({
+          event: 'lock_release_failed',
+          mode: auditData.mode,
+          lockKey: walletLockKey(heldLock.identity, heldLock.blockchain)
+        });
+      }
     }
 
     if (auditData.mode && auditData.blockchain) {

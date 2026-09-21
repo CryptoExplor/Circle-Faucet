@@ -57,6 +57,12 @@ export function createFakeKv() {
       return next;
     },
 
+    async ttl(key) {
+      const e = store.get(key);
+      if (!alive(e, Date.now())) return -2;
+      return Math.max(0, Math.round((e.expiresAt - Date.now()) / 1000));
+    },
+
     async expire(key, seconds) {
       const e = store.get(key);
       if (!alive(e, Date.now())) return 0;
