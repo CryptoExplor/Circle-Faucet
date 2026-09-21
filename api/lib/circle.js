@@ -137,6 +137,9 @@ function isAmbiguousStatus(statusCode) {
   return statusCode >= 500 || statusCode === 408;
 }
 
+// A Circle attempt with less than this left is abandoned before it starts.
+const MIN_ATTEMPT_BUDGET_MS = 1500;
+
 /**
  * Try to complete a drip with at most `maxAttempts` different keys, advancing
  * the shared round-robin rotation for every attempt.
@@ -169,9 +172,13 @@ export async function claimWithFallback(payload, opts) {
     // Recompute the remaining budget AFTER the rotation INCR: that KV round
     // trip can take up to the KV command deadline, and charging it to the
     // Circle timeout would let per-attempt deadlines overshoot the total
-    // (N8). Too little left -> explicitly abandon WITHOUT sending anything.
+    // (N8). Below MIN_ATTEMPT_BUDGET_MS -> explicitly abandon WITHOUT
+    // sending anything (N9): the drips endpoint regularly takes >1s, so a
+    // shorter client timeout yields "outcome unknown" on a request that may
+    // still have executed server-side — the worst state (24h lock, possible
+    // uncredited drip). Matches MIN_CIRCLE_ATTEMPT_MS in api/claim.js.
     const remaining = totalDeadlineMs - (Date.now() - start);
-    if (remaining < 500) {
+    if (remaining < MIN_ATTEMPT_BUDGET_MS) {
       console.error(
         attempt === 0
           ? '[FALLBACK] Budget exhausted before the first Circle request — nothing was sent'

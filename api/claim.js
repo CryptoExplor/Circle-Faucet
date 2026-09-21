@@ -381,11 +381,13 @@ export default async function handler(req, res) {
       // 90s TTL — pre-extension, so no 24h orphan is possible here.)
       const cleaned = await releaseWalletLock(canonical.identity, blockchain, lock.token);
       await releaseIpDailyClaim(clientIp, ipReservation.day);
+      // N11: 'absent' (SET never applied / someone else owns it) is NOT a
+      // failure — only 'failed' means a lock may still be out there.
       auditLog({
         ...auditData,
         event: 'wallet_lock_uncertain',
-        lockReleased: cleaned,
-        ...(cleaned ? {} : { lockKey: walletLockKey(canonical.identity, blockchain) })
+        lockReleased: cleaned !== 'failed',
+        ...(cleaned === 'failed' ? { lockKey: walletLockKey(canonical.identity, blockchain) } : {})
       });
       return res.status(503).json({
         error: 'Faucet unavailable',
@@ -407,19 +409,47 @@ export default async function handler(req, res) {
         const t = setTimeout(r, 1600);
         if (typeof t.unref === 'function') t.unref();
       });
+      // Track the LOCK half separately: the lock is the only reservation that
+      // can burn a wallet, so only ITS lateness/failure may page ops. The IP
+      // counter is bucket-scoped and rolls over with its window — a slow IP
+      // release must not emit lock_release_timeout (it would be a false
+      // alarm about a lock that was in fact released).
+      let lockOutcome = null; // 'released' | 'absent' | 'failed' | null while in flight
       const settled = await Promise.race([
         Promise.all([
-          releaseWalletLock(canonical.identity, blockchain, lock.token),
+          releaseWalletLock(canonical.identity, blockchain, lock.token).then((r) => (lockOutcome = r)),
           releaseIpDailyClaim(clientIp, ipReservation.day)
-        ]).then(([lockReleased]) => ({ timedOut: false, lockReleased })),
-        cap.then(() => ({ timedOut: true, lockReleased: null }))
+        ]),
+        cap.then(() => ({ timedOut: true }))
       ]);
-      if (settled.timedOut) {
-        auditLog({ ...auditData, event: 'lock_release_timeout', lockKey });
-      } else if (!settled.lockReleased) {
+      if (settled && settled.timedOut) {
+        if (lockOutcome === null) {
+          // The lock release did not finish inside the cap. On a frozen
+          // serverless instance it will never finish: audit for clearance.
+          auditLog({ ...auditData, event: 'lock_release_timeout', lockKey });
+        }
+        // else: lock was released/absent in time — only the IP counter lagged.
+      } else if (lockOutcome === 'failed') {
+        // N11: 'absent' is a normal outcome (nothing of ours left behind);
+        // only 'failed' means a 24h lock may remain.
         auditLog({ ...auditData, event: 'lock_release_failed', lockKey });
       }
     };
+
+    // N10: the budget decision happens BEFORE the 24h extension — a bail-out
+    // here only has to release the provisional 90s lock, which self-heals
+    // even if the release itself fails. (The fallback loop re-checks the
+    // budget with the same floor after every rotation INCR; its floor is
+    // what catches a budget that dies inside the extension.)
+    const preExtendRemainingMs = getRequestBudgetMs() - (Date.now() - startTime);
+    if (preExtendRemainingMs < MIN_CIRCLE_ATTEMPT_MS) {
+      auditLog({ ...auditData, event: 'request_budget_exhausted', remainingBudgetMs: preExtendRemainingMs });
+      await releaseReservations();
+      return res.status(503).json({
+        error: 'Faucet unavailable',
+        message: 'The faucet is temporarily overloaded. Please try again in a moment.'
+      });
+    }
 
     // N5: establish the 24h TTL WRITE-AHEAD. Awaited BEFORE anything is sent
     // to Circle: if it fails we fail closed with nothing sent, and every
@@ -437,19 +467,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // N2: the Circle fallback inherits the REMAINING request budget — a fresh
-    // deadline here would let slow-but-alive KV push the total past maxDuration.
-    const remainingBudgetMs = getRequestBudgetMs() - (Date.now() - startTime);
-    if (remainingBudgetMs < MIN_CIRCLE_ATTEMPT_MS) {
-      // Nothing has been sent to Circle: release everything and bail.
-      auditLog({ ...auditData, event: 'request_budget_exhausted', remainingBudgetMs });
-      await releaseReservations();
-      return res.status(503).json({
-        error: 'Faucet unavailable',
-        message: 'The faucet is temporarily overloaded. Please try again in a moment.'
-      });
-    }
-
     // ---- Call Circle with bounded, ambiguity-safe fallback ----------------
     // If this throws (e.g. a KV failure while advancing rotation) NOTHING has
     // been sent to Circle — release both reservations so the wallet/IP are
@@ -458,7 +475,10 @@ export default async function handler(req, res) {
     try {
       result = await claimWithFallback(payload, {
         keys: apiKeys,
-        totalDeadlineMs: remainingBudgetMs
+        // Measured AT CALL TIME (after the extension) so the extension's cost
+        // is charged to the Circle attempts; the loop re-checks it after
+        // every rotation INCR (N8/N9).
+        totalDeadlineMs: getRequestBudgetMs() - (Date.now() - startTime)
       });
     } catch (error) {
       await releaseReservations();
@@ -524,9 +544,14 @@ export default async function handler(req, res) {
 
     if (result.outcome === 'exhausted') {
       auditLog({ ...auditData, event: 'keys_exhausted', statusCode: result.lastResponse?.statusCode });
+      // N12: Circle's own message/code/details pass through unchanged from
+      // the original implementation — only the `error` category label is the
+      // faucet's own (documented in the PR release notes).
       return res.status(result.lastResponse?.statusCode || 429).json({
         error: 'All API keys exhausted',
-        message: 'All faucet API keys are currently rate-limited. Please try again later.'
+        message: result.lastResponse?.data?.message || 'All faucet API keys are currently rate-limited. Please try again later.',
+        code: result.lastResponse?.data?.code,
+        details: result.lastResponse?.data
       });
     }
 
@@ -541,7 +566,8 @@ export default async function handler(req, res) {
     return res.status(result.response.statusCode).json({
       error: 'Circle API error',
       message: result.response.data?.message || 'Failed to claim tokens',
-      code: result.response.data?.code
+      code: result.response.data?.code,
+      details: result.response.data // N12: restored (original pass-through)
     });
   } catch (error) {
     console.error('[FATAL_ERROR]', error);
@@ -556,7 +582,7 @@ export default async function handler(req, res) {
     // nothing was dispensed (all dispensing paths handle the lock explicitly).
     if (heldLock) {
       const released = await releaseWalletLock(heldLock.identity, heldLock.blockchain, heldLock.token);
-      if (!released) {
+      if (released === 'failed') {
         auditLog({
           event: 'lock_release_failed',
           mode: auditData.mode,

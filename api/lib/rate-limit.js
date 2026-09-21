@@ -40,7 +40,9 @@ import { sha256Hex, clientIpBucket } from './validate.js';
  * could destroy another claimant's lock. Therefore:
  *
  *  1. The lock value is a UNIQUE per-request token. Only the creator knows it,
- *     so GET-compare-then-DEL is a safe ownership-checked release without Lua.
+ *     so a compare-and-delete (`EVAL` Lua script — ONE round trip; a
+ *     GET-compare-then-DEL fallback exists for clients without `eval`) is a
+ *     safe ownership-checked release.
  *  2. Acquire sets a PROVISIONAL TTL (90s): an orphan created before the
  *     extension point (ambiguous acquire, pre-POST crash) self-heals in
  *     <=90 seconds. AFTER a successful extension the lock is 24h by design;
@@ -254,20 +256,47 @@ export async function extendWalletLock(identity, blockchain, token) {
  * @param {string} token token returned by acquireWalletLock
  * @returns {Promise<boolean>} true if we owned and deleted it
  */
+// N10: single-round-trip ownership-checked delete. GET-then-DEL costs two
+// sequential round trips, which cannot fit the caller's response cap once KV
+// latency approaches the per-command deadline; this does both atomically in
+// one. Result: 1 = lock deleted, 0 = key absent or owned by another token.
+const RELEASE_IF_OWNED = [
+  "if redis.call('GET', KEYS[1]) == ARGV[1] then",
+  "  return redis.call('DEL', KEYS[1])",
+  'else',
+  '  return 0',
+  'end'
+].join('\n');
+
+/**
+ * Release the wallet lock if (and only if) we still own it.
+ * @returns {Promise<'released'|'absent'|'failed'>}
+ *   - 'released': our token was found and the lock deleted (or a prior
+ *     ambiguous attempt most likely deleted it — our token is no longer there).
+ *   - 'absent': the key does not exist or another holder owns it. NOT a
+ *     failure — nothing of ours was left behind (N11: no false alarm).
+ *   - 'failed': KV misbehaved on every attempt; the lock MAY still be held
+ *     (24h TTL after the extension). Callers must audit with the exact key.
+ */
 export async function releaseWalletLock(identity, blockchain, token) {
-  if (typeof token !== 'string' || token.length === 0) return false;
+  if (typeof token !== 'string' || token.length === 0) return 'failed';
   const key = walletLockKey(identity, blockchain);
   // A failed release leaves the CONSERVATIVE 24h lock on a wallet that
   // received nothing, so transient KV blips are retried here (bounded).
-  // Persistent failure is surfaced to the caller (false) which audits the
-  // exact key for manual clearance via scripts/clear-lock.mjs.
+  // Persistent failure is surfaced as 'failed' which audits the exact key
+  // for manual clearance via scripts/clear-lock.mjs.
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const kv = await getKv();
+      if (typeof kv.eval === 'function') {
+        const result = await kv.eval(RELEASE_IF_OWNED, [key], [token]);
+        return result === 1 ? 'released' : 'absent';
+      }
+      // Legacy fallback (client without eval): two round trips.
       const current = await kv.get(key);
-      if (current !== token) return attempt > 0; // not ours (anymore); a prior attempt may have succeeded
+      if (current !== token) return attempt > 0 ? 'released' : 'absent'; // a prior ambiguous attempt may have deleted it
       await kv.del(key);
-      return true;
+      return 'released';
     } catch (error) {
       console.error(`[RATE_LIMIT] wallet lock release attempt ${attempt + 1}/3 failed:`, error.message);
       if (attempt < 2) {
@@ -279,7 +308,7 @@ export async function releaseWalletLock(identity, blockchain, token) {
     }
   }
   console.error(`[RATE_LIMIT] wallet lock release FAILED after retries — key ${key} holds a 24h lock; clear via scripts/clear-lock.mjs`);
-  return false;
+  return 'failed';
 }
 
 /**

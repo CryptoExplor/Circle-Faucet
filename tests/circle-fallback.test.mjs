@@ -71,31 +71,41 @@ test('transport error is AMBIGUOUS: never retried (double-drip protection)', asy
   assert.equal(r.error.message, 'Request timed out');
 });
 
-test('total deadline bounds retry attempts', async () => {
+test('N9: a remainder inside [500ms, 1500ms) sends NOTHING (floor pinned)', async () => {
   let calls = 0;
   const requester = async () => {
     calls++;
-    await new Promise((r) => setTimeout(r, 400));
-    return { statusCode: 429, data: {} };
+    return { statusCode: 200, data: {} };
   };
-  const start = Date.now();
   const r = await claimWithFallback({}, {
     keys,
     requester,
     perRequestTimeoutMs: 4000,
-    totalDeadlineMs: 1000
+    totalDeadlineMs: 1000 // above the old 500ms floor, below the 1500ms one
   });
-  const elapsed = Date.now() - start;
-  // N8: remaining is recomputed AFTER the rotation INCR; once it drops under
-  // 500ms no further Circle request is sent at all (budget_exhausted) — the
-  // old behavior fired one more doomed request that could still dispense
-  // after the caller's deadline.
+  // The old floor (500ms) sent a doomed request here: a client timeout on a
+  // POST that may still have executed server-side (24h lock, possible
+  // uncredited drip). The floor is now 1500ms — nothing may be sent.
   assert.equal(r.outcome, 'budget_exhausted');
-  assert.ok(calls < keys.length, `deadline must cut retries short (made ${calls} calls)`);
-  assert.ok(elapsed < 1500, `must respect deadline, took ${elapsed}ms`);
+  assert.equal(calls, 0, `a doomed attempt must not be started (made ${calls} calls)`);
 });
 
-test('a sub-500ms remainder bails BEFORE the first attempt (nothing sent)', async () => {
+test('N9: at/above the 1500ms floor an attempt still runs', async () => {
+  let calls = 0;
+  const requester = async () => {
+    calls++;
+    return { statusCode: 200, data: {} };
+  };
+  const r = await claimWithFallback({}, {
+    keys,
+    requester,
+    totalDeadlineMs: 1600 // strictly above the floor
+  });
+  assert.equal(r.outcome, 'success');
+  assert.equal(calls, 1);
+});
+
+test('a hopeless (<floor) remainder bails BEFORE the first attempt (nothing sent)', async () => {
   let calls = 0;
   const requester = async () => {
     calls++;
@@ -106,9 +116,9 @@ test('a sub-500ms remainder bails BEFORE the first attempt (nothing sent)', asyn
     requester,
     totalDeadlineMs: 1 // pathological: no budget at all
   });
-  // N8 semantics: even attempt #1 is skipped when the remainder cannot fund
-  // a meaningful Circle call — a request sent now could still dispense after
-  // the handler has been torn down, with no way to credit it.
+  // N8/N9 semantics: even attempt #1 is skipped when the remainder cannot
+  // fund a meaningful Circle call — a request sent now could still dispense
+  // after the handler has been torn down, with no way to credit it.
   assert.equal(r.outcome, 'budget_exhausted');
   assert.equal(calls, 0, 'no Circle request may be sent on a hopeless budget');
 });

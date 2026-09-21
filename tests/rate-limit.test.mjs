@@ -88,8 +88,8 @@ test('N1: timed-out SET that still applied is detected via the token', async () 
   assert.equal(l.acquired, true, 'ownership recovered via GET token compare');
   assert.equal(l.ambiguous, true);
   // owner can release it by token; a stranger's token cannot
-  assert.equal(await releaseWalletLock('0xabc', 'ARC-TESTNET', 'not-my-token'), false);
-  assert.equal(await releaseWalletLock('0xabc', 'ARC-TESTNET', l.token), true);
+  assert.equal(await releaseWalletLock('0xabc', 'ARC-TESTNET', 'not-my-token'), 'absent');
+  assert.equal(await releaseWalletLock('0xabc', 'ARC-TESTNET', l.token), 'released');
 });
 
 test('N1: fully-unavailable KV yields ambiguous NOT-acquired, never a 24h orphan source', async () => {
@@ -102,6 +102,54 @@ test('N1: fully-unavailable KV yields ambiguous NOT-acquired, never a 24h orphan
   const l = await acquireWalletLock('0xabc', 'ARC-TESTNET');
   assert.equal(l.acquired, false);
   assert.equal(l.ambiguous, true, 'caller must know cleanup is needed');
+});
+
+test('release tri-state: absent / released / failed (N11)', async () => {
+  const base = createFakeKv();
+  setKvClientForTests(base);
+  // absent: nothing was ever locked
+  assert.equal(await releaseWalletLock('0xabc', 'ARC-TESTNET', 'some-token'), 'absent');
+  // released
+  const l = await acquireWalletLock('0xabc', 'ARC-TESTNET');
+  assert.equal(await releaseWalletLock('0xabc', 'ARC-TESTNET', l.token), 'released');
+  // failed: KV misbehaves on every attempt (eval AND legacy get/del)
+  setKvClientForTests({
+    get: async () => { throw new Error('KV down'); },
+    del: async () => { throw new Error('KV down'); },
+    eval: async () => { throw new Error('KV down'); }
+  });
+  assert.equal(await releaseWalletLock('0xabc', 'ARC-TESTNET', 'x'.repeat(32)), 'failed');
+});
+
+test('release uses the single-round-trip eval path when the client offers it', async () => {
+  const base = createFakeKv();
+  let evalCalls = 0;
+  let getCalls = 0;
+  const client = {};
+  for (const m of ['get', 'set', 'del', 'incr', 'decr', 'expire', 'hgetall', 'hincrby', 'eval']) {
+    client[m] = (...a) => base[m](...a);
+  }
+  client.get = async (k) => { getCalls++; return base.get(k); };
+  client.eval = async (script, keys, args) => { evalCalls++; return base.eval(script, keys, args); };
+  setKvClientForTests(client);
+  const l = await acquireWalletLock('0xabc', 'ARC-TESTNET');
+  const released = await releaseWalletLock('0xabc', 'ARC-TESTNET', l.token);
+  assert.equal(released, 'released');
+  assert.equal(evalCalls, 1, 'one atomic command');
+  assert.equal(getCalls, 0, 'no separate ownership GET round trip');
+});
+
+test('release falls back to GET-compare-then-DEL on clients without eval', async () => {
+  const base = createFakeKv();
+  const client = {};
+  for (const m of ['get', 'set', 'del', 'incr', 'decr', 'expire', 'hgetall', 'hincrby']) {
+    client[m] = (...a) => base[m](...a);
+  }
+  setKvClientForTests(client); // note: no eval — legacy path
+  const l = await acquireWalletLock('0xabc', 'ARC-TESTNET');
+  assert.equal(await releaseWalletLock('0xabc', 'ARC-TESTNET', 'wrong-token'), 'absent');
+  assert.equal(await releaseWalletLock('0xabc', 'ARC-TESTNET', l.token), 'released');
+  assert.equal(await base.get('__nonexistent__'), null);
 });
 
 test('wallet lock release (ownership-checked) allows a second claim', async () => {

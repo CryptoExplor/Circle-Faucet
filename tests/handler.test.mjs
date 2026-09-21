@@ -197,6 +197,10 @@ test('default mode: definitive failure RELEASES the wallet lock and IP quota', a
   const res = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
   assert.equal(res.statusCode, 429);
   assert.match(res.body.error, /exhausted/i);
+  // N12: Circle's own body passes through, as in the original implementation
+  assert.equal(res.body.message, 'rate limited');
+  assert.equal(res.body.code, 101);
+  assert.deepEqual(res.body.details, { code: 101, message: 'rate limited' });
 
   // Keys recover -> the SAME wallet can claim again (lock was released)
   setRequesterForTests(async () => ({ statusCode: 200, data: { transactionId: 'tx-2' } }));
@@ -324,24 +328,25 @@ async function captureAudits(fn) {
   }
 }
 
-test('S1: Circle 400 + transiently failing lock DEL -> retry succeeds, lock removed', async () => {
+test('S1: Circle 400 + transiently failing lock release (EVAL) -> retry succeeds, lock removed', async () => {
   const base = createFakeKv();
-  let delFailures = 0;
+  let evalFailures = 0;
   setKvClientForTests({
     get: (k) => base.get(k),
     set: (k, v, o) => base.set(k, v, o),
-    del: async (k) => {
-      if (k.startsWith('faucet:lock:') && delFailures < 2) {
-        delFailures++;
-        throw new Error('KV blip on DEL');
-      }
-      return base.del(...(Array.isArray(k) ? k : [k]));
-    },
+    del: (...k) => base.del(...k),
     incr: (k) => base.incr(k),
     decr: (k) => base.decr(k),
     expire: (k, sec) => base.expire(k, sec),
     hgetall: (k) => base.hgetall(k),
-    hincrby: (k, f, b) => base.hincrby(k, f, b)
+    hincrby: (k, f, b) => base.hincrby(k, f, b),
+    eval: async (script, keys, args) => {
+      if (evalFailures < 2) {
+        evalFailures++;
+        throw new Error('KV blip on EVAL');
+      }
+      return base.eval(script, keys, args);
+    }
   });
   setRequesterForTests(async () => ({ statusCode: 400, data: { code: 0, message: 'rejected' } }));
 
@@ -349,25 +354,26 @@ test('S1: Circle 400 + transiently failing lock DEL -> retry succeeds, lock remo
     claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD })
   );
   assert.equal(res.statusCode, 400, 'definitive Circle rejection passes through');
-  assert.ok(delFailures >= 1, 'the DEL actually failed transiently');
+  assert.equal(res.body.details?.message, 'rejected', 'N12: Circle body passed through as details');
+  assert.ok(evalFailures >= 1, 'the release actually failed transiently');
   // the retried release must have removed the lock
   assert.equal([...base._dump().keys()].some((k) => k.startsWith('faucet:lock:')), false, 'lock removed after retry');
 });
 
-test('S1-hard: Circle 400 + permanently failing lock DEL -> 400, audited with the exact key', async () => {
+test('S1-hard: Circle 400 + permanently failing lock release -> 400, audited with the exact key', async () => {
   const base = createFakeKv();
   setKvClientForTests({
     get: (k) => base.get(k),
     set: (k, v, o) => base.set(k, v, o),
-    del: async (k) => {
-      if (k.startsWith('faucet:lock:')) throw new Error('KV down on DEL');
-      return base.del(...(Array.isArray(k) ? k : [k]));
-    },
+    del: (...k) => base.del(...k),
     incr: (k) => base.incr(k),
     decr: (k) => base.decr(k),
     expire: (k, sec) => base.expire(k, sec),
     hgetall: (k) => base.hgetall(k),
-    hincrby: (k, f, b) => base.hincrby(k, f, b)
+    hincrby: (k, f, b) => base.hincrby(k, f, b),
+    eval: async () => {
+      throw new Error('KV down on EVAL');
+    }
   });
   setRequesterForTests(async () => ({ statusCode: 400, data: { code: 0, message: 'rejected' } }));
 
@@ -397,10 +403,7 @@ test('S2: ambiguous EXPIRE + failed cleanup -> 503 and audited failed release', 
       }
       return base.set(k, v, o);
     },
-    del: async (k) => {
-      if (k.startsWith('faucet:lock:')) throw new Error('KV down on DEL');
-      return base.del(...(Array.isArray(k) ? k : [k]));
-    },
+    del: (...k) => base.del(...k),
     incr: (k) => base.incr(k),
     decr: (k) => base.decr(k),
     expire: async (k, sec) => {
@@ -408,7 +411,10 @@ test('S2: ambiguous EXPIRE + failed cleanup -> 503 and audited failed release', 
       return base.expire(k, sec);
     },
     hgetall: (k) => base.hgetall(k),
-    hincrby: (k, f, b) => base.hincrby(k, f, b)
+    hincrby: (k, f, b) => base.hincrby(k, f, b),
+    eval: async () => {
+      throw new Error('KV down on EVAL (cleanup fails too)');
+    }
   });
   setRequesterForTests(async () => ({ statusCode: 200, data: { transactionId: 'tx' } }));
 
@@ -421,6 +427,66 @@ test('S2: ambiguous EXPIRE + failed cleanup -> 503 and audited failed release', 
   // The cleanup could not verify ownership (GET fails) -> provisional 90s orphan
   // self-heals; the audit line reports lockReleased:false for observability.
   assert.match(uncertain, /"lockReleased":false/);
+});
+
+test('N10: slow-KV bail-out leaves NO lock behind at response time (atomic eval release)', async () => {
+  process.env.CLAIM_REQUEST_BUDGET_MS = '3800'; // consumed by ~3.5 KV round trips
+  const base = createFakeKv();
+  const slow = {};
+  for (const m of ['get', 'del', 'incr', 'decr', 'expire', 'hgetall', 'hincrby', 'set', 'eval']) {
+    slow[m] = async (...a) => {
+      await new Promise((r) => setTimeout(r, 500));
+      return base[m](...a);
+    };
+  }
+  setKvClientForTests(slow);
+  let circleCalls = 0;
+  setRequesterForTests(async () => {
+    circleCalls++;
+    return { statusCode: 200, data: { transactionId: 'tx' } };
+  });
+
+  const { result: res, lines } = await captureAudits(() =>
+    claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD })
+  );
+  delete process.env.CLAIM_REQUEST_BUDGET_MS;
+  assert.equal(res.statusCode, 503);
+  assert.equal(circleCalls, 0, 'nothing sent on a doomed budget (N9 floor)');
+  // The 24h extension DID apply before the bail-out; the single-round-trip
+  // eval release must still fit the 1.6s cap and remove the lock IN TIME —
+  // at >=0.8s/command the old two-round-trip release could not (N10).
+  assert.equal([...base._dump().keys()].some((k) => k.startsWith('faucet:lock:')), false, 'lock absent at response time');
+  assert.ok(!lines.some((l) => l.includes('lock_release_failed') || l.includes('lock_release_timeout')), 'no false release alarms');
+});
+
+test('N10b: a slow IP-counter release must NOT raise a false lock_release_timeout', async () => {
+  const base = createFakeKv();
+  const client = {};
+  for (const m of ['get', 'set', 'del', 'incr', 'expire', 'hgetall', 'hincrby', 'eval']) {
+    client[m] = (...a) => base[m](...a);
+  }
+  // The IP release path uses decr (+del at 0); make ONLY those slow so the
+  // 1.6s cap elapses after the lock half has long settled.
+  client.decr = async (...a) => {
+    await new Promise((r) => setTimeout(r, 1900));
+    return base.decr(...a);
+  };
+  client.del = async (...a) => {
+    await new Promise((r) => setTimeout(r, 1900));
+    return base.del(...a);
+  };
+  setKvClientForTests(client);
+  setRequesterForTests(async () => ({ statusCode: 400, data: { code: 0, message: 'rejected' } }));
+
+  const { result: res, lines } = await captureAudits(() =>
+    claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD })
+  );
+  assert.equal(res.statusCode, 400);
+  assert.equal([...base._dump().keys()].some((k) => k.startsWith('faucet:lock:')), false, 'lock was released in time');
+  assert.ok(
+    !lines.some((l) => l.includes('lock_release_timeout') || l.includes('lock_release_failed')),
+    'IP-counter lateness must not page ops about the lock'
+  );
 });
 
 test('N8: per-attempt Circle timeout reflects the budget AFTER the rotation INCR', async () => {
@@ -556,8 +622,16 @@ test('N1 E2E b: timed-out lock SET that did NOT apply -> 503, wallet immediately
     }
   });
 
-  const first = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });
+  const { result: first, lines } = await captureAudits(() =>
+    claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD })
+  );
   assert.equal(first.statusCode, 503, 'fail closed, nothing dispensed');
+  // N11: the SET never applied, so there is nothing to clean up — the audit
+  // must NOT report a failed release for a lock that does not exist.
+  const uncertain = lines.find((l) => l.includes('wallet_lock_uncertain'));
+  assert.ok(uncertain, 'ambiguous acquire audited');
+  assert.match(uncertain, /"lockReleased":true/, "absent lock is not a release failure");
+  assert.doesNotMatch(uncertain, /lockKey/, 'no ops key emitted for a lock that never existed');
 
   setKvClientForTests(createFakeKv());
   const retry = await claim({ address: ADDR, blockchain: 'ETH-SEPOLIA', usdc: true, mode: 'default', password: PASSWORD });

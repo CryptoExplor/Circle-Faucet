@@ -40,7 +40,7 @@ function withTimeout(promise, label) {
 
 const COMMANDS = [
   'get', 'set', 'del', 'incr', 'decr', 'expire', 'hget', 'hgetall',
-  'hincrby', 'hset', 'ttl', 'exists', 'scan'
+  'hincrby', 'hset', 'ttl', 'exists', 'scan', 'eval'
 ];
 
 let injected = null;

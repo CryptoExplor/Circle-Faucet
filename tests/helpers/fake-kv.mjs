@@ -57,6 +57,23 @@ export function createFakeKv() {
       return next;
     },
 
+    // Lua compare-and-delete, as used by releaseWalletLock. Only the known
+    // lock-release script shape is supported; anything else throws so a
+    // mismatch can never silently succeed.
+    async eval(script, keys, args) {
+      const flat = String(script).replace(/\s+/g, ' ');
+      if (flat.includes("redis.call('GET', KEYS[1]) == ARGV[1]") && flat.includes("redis.call('DEL', KEYS[1])")) {
+        const k = keys[0];
+        const e = store.get(k);
+        if (alive(e, Date.now()) && e.value === args[0]) {
+          store.delete(k);
+          return 1;
+        }
+        return 0;
+      }
+      throw new Error('fake-kv: unsupported eval script');
+    },
+
     async ttl(key) {
       const e = store.get(key);
       if (!alive(e, Date.now())) return -2;

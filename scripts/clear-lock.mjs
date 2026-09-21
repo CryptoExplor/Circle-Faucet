@@ -18,15 +18,20 @@
  * into an address, which is why this helper exists.
  */
 
-import { canonicalizeAddress, isSupportedChain } from '../api/lib/validate.js';
+import { canonicalizeAddress, isSupportedChain, SUPPORTED_CHAINS } from '../api/lib/validate.js';
 import { walletLockKey } from '../api/lib/rate-limit.js';
 import { getKv } from '../api/lib/kv.js';
 
-const [address, chain] = process.argv.slice(2);
+const argv = process.argv.slice(2);
+const assumeYes = argv.includes('--yes');
+const [address, chain] = argv.filter((a) => a !== '--yes');
 
 if (!address || !chain) {
-  console.error('Usage: node scripts/clear-lock.mjs <address> <chain>');
-  console.error(`Supported chains: ${'ARC-TESTNET ETH-SEPOLIA AVAX-FUJI MATIC-AMOY ARB-SEPOLIA UNI-SEPOLIA BASE-SEPOLIA OP-SEPOLIA SOL-DEVNET APTOS-TESTNET'.split(' ').join(', ')}`);
+  console.error('Usage: node scripts/clear-lock.mjs <address> <chain> [--yes]');
+  console.error(`Supported chains: ${SUPPORTED_CHAINS.join(', ')}`);
+  console.error('');
+  console.error('Without --yes the script is a DRY RUN: it shows the lock key,');
+  console.error('holder-token prefix and remaining TTL, then exits.');
   process.exit(1);
 }
 
@@ -51,6 +56,21 @@ try {
     process.exit(0);
   }
   const ttl = await kv.ttl(key);
+
+  // N13: a lock held by a SUCCESSFUL claim is legitimate (24h by design) and
+  // looks identical to a stuck one here. Never delete without explicit intent.
+  if (!assumeYes) {
+    console.log(`Lock found: ${key}`);
+    console.log(`  holder token: ${String(existing).slice(0, 8)}…   TTL remaining: ${ttl}s`);
+    console.log('DRY RUN — nothing was deleted. Re-run with --yes to delete.');
+    console.log('');
+    console.log('Before deleting, cross-check the audit log: the newest event for');
+    console.log('this wallet should be lock_release_failed/lock_release_timeout —');
+    console.log('a lock whose newest event is claim_success is LEGITIMATE (that');
+    console.log('wallet claimed and must stay locked for 24h).');
+    process.exit(0);
+  }
+
   const deleted = await kv.del(key);
   console.log(
     deleted > 0
